@@ -1651,7 +1651,8 @@ std::vector<float> applyCameraBandPass(
 // Scene light source relative to the light the film is balanced for.
 // Spectra are analytic models written for this project (Planck's law plus Gaussian
 // emission lines), not measured tables: blackbody sources, cool-white and tri-band
-// fluorescent tubes (mercury lines + phosphor bands) and a high-pressure sodium lamp.
+// fluorescent tubes (mercury lines + phosphor bands), a high-pressure sodium lamp, a white
+// LED (blue chip + yellow phosphor), a xenon arc and a clear mercury-vapour lamp.
 float planckRelative(float wavelengthNm, float kelvin) {
   constexpr double c2 = 1.4388e7; // nm*K
   const double wl = std::max(static_cast<double>(wavelengthNm), 1.0);
@@ -1684,6 +1685,17 @@ float sceneIlluminantSpectrum(int32_t kind, float wl) {
     case 9: // high-pressure sodium: broadened D lines with wings
       return 0.02f + gaussianBand(wl, 589.0f, 8.0f) + 0.35f * gaussianBand(wl, 595.0f, 30.0f) +
              0.05f * gaussianBand(wl, 470.0f, 8.0f) + 0.08f * gaussianBand(wl, 819.0f, 6.0f);
+    case 10: // white LED: narrow blue chip peak, broad yellow phosphor, dip near 480 nm
+      return 0.01f + 1.35f * gaussianBand(wl, 450.0f, 10.0f) + gaussianBand(wl, 560.0f, 50.0f) +
+             0.20f * gaussianBand(wl, 620.0f, 35.0f);
+    case 11: // xenon arc (flash, projector): near-daylight continuum, weak blue lines, IR lines
+      return planckRelative(wl, 6000.0f) + 0.10f * gaussianBand(wl, 467.0f, 2.0f) +
+             0.08f * gaussianBand(wl, 473.0f, 2.0f) + 0.60f * gaussianBand(wl, 823.0f, 3.0f) +
+             0.70f * gaussianBand(wl, 881.0f, 4.0f);
+    case 12: // clear mercury vapour (no phosphor): lines only, almost no red
+      return 0.04f + 0.40f * gaussianBand(wl, 405.0f, 3.0f) + 0.85f * gaussianBand(wl, 436.0f, 3.0f) +
+             1.00f * gaussianBand(wl, 546.0f, 4.0f) + 0.75f * gaussianBand(wl, 578.0f, 4.0f) +
+             0.05f * gaussianBand(wl, 615.0f, 30.0f);
     default: return 1.0f;
   }
 }

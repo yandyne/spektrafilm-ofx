@@ -85,6 +85,9 @@ constexpr ChoiceOption kStaticOptions[] = {
   {"sceneIlluminant", "Cool white fluorescent"},
   {"sceneIlluminant", "Tri-band fluorescent"},
   {"sceneIlluminant", "Sodium street light"},
+  {"sceneIlluminant", "White LED"},
+  {"sceneIlluminant", "Xenon flash"},
+  {"sceneIlluminant", "Mercury vapour lamp"},
   {"autoExposureMethod", "Center weighted"},
   {"autoExposureMethod", "Median"},
   {"pushPullMode", "Standard"},
@@ -171,7 +174,7 @@ constexpr SpektraAppParamDescriptor kParams[] = {
   param("cameraIrFilterEnabled", "Filter IR", "filtering", SpektraAppParamKindBool, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 1.0),
   param("cameraIrCutNm", "IR Cut nm", "filtering", SpektraAppParamKindDouble, kParamTagNone, 0, 675.0, 0.0, 0.0, 600.0, 780.0),
   param("cameraColorFilter", "Color Filter", "filtering", SpektraAppParamKindChoice, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 4.0, "cameraColorFilter"),
-  param("sceneIlluminant", "Scene Light", "filtering", SpektraAppParamKindChoice, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 9.0, "sceneIlluminant"),
+  param("sceneIlluminant", "Scene Light", "filtering", SpektraAppParamKindChoice, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 12.0, "sceneIlluminant"),
   param("sceneIlluminantAmount", "Scene Light Amount", "filtering", SpektraAppParamKindDouble, kParamTagNone, 0, 1.0, 0.0, 0.0, 0.0, 1.0),
 
   param("rgbToRawMethod", "RGB to Raw", "film", SpektraAppParamKindChoice, kParamTagFlow, 0, 0.0, 0.0, 0.0, 0.0, 2.0, "rgbToRawMethod"),
@@ -332,7 +335,7 @@ spektrafilm::RenderParams toRendererParams(const SpektraAppRenderParams &p) {
   out.cameraIrFilterEnabled = p.cameraIrFilterEnabled != 0;
   out.cameraIrCutNm = p.cameraIrCutNm;
   out.cameraColorFilter = std::clamp(p.cameraColorFilter, 0, 4);
-  out.sceneIlluminant = std::clamp(p.sceneIlluminant, 0, 9);
+  out.sceneIlluminant = std::clamp(p.sceneIlluminant, 0, 12);
   out.sceneIlluminantAmount = std::clamp(static_cast<float>(p.sceneIlluminantAmount), 0.0f, 1.0f);
   out.filmExposureEv = p.filmExposureEv;
   out.autoExposure = p.autoExposure != 0;
