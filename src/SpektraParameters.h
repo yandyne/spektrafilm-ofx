@@ -149,6 +149,10 @@ struct RenderParams {
   float cameraUvCutNm = 410.0f;
   bool cameraIrFilterEnabled = false;
   float cameraIrCutNm = 675.0f;
+  // Emulsa: black-and-white contrast filter (0 none, 1 yellow, 2 orange, 3 red, 4 green).
+  int32_t cameraColorFilter = 0;
+  int32_t sceneIlluminant = 0;
+  float sceneIlluminantAmount = 1.0f;
 
   float filmExposureEv = 0.0f;
   bool autoExposure = false;
@@ -161,6 +165,24 @@ struct RenderParams {
   float negativeLeucoCyanCoupling = 1.0f;
   float printBleachBypassAmount = 0.0f;
   float filmGamma = 1.0f;
+  float filmDevLogShiftR = 0.0f;
+  float filmDevLogShiftG = 0.0f;
+  float filmDevLogShiftB = 0.0f;
+  float filmDevGammaR = 1.0f;
+  float filmDevGammaG = 1.0f;
+  float filmDevGammaB = 1.0f;
+  float filmDevFogR = 0.0f;
+  float filmDevFogG = 0.0f;
+  float filmDevFogB = 0.0f;
+  float filmDevDmaxR = 1.0f;
+  float filmDevDmaxG = 1.0f;
+  float filmDevDmaxB = 1.0f;
+  float printCallierQ = 1.0f;
+  int printSplitGrade = 0;
+  float printSoftGamma = 1.0f;
+  float printHardGamma = 1.0f;
+  float printSoftLogOffset = 0.0f;
+  float printHardLogOffset = 0.0f;
   float printGamma = 1.0f;
   float printShadowShape = 0.0f;
   float printHighlightShape = 0.0f;

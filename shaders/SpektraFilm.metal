@@ -174,6 +174,28 @@ struct SpektraKernelParams {
   uint spectralTransmittanceMode;
   uint _padPerf0;
   float time;
+  int frameOriginX;
+  int frameOriginY;
+  uint frameWidth;
+  uint frameHeight;
+  float filmDevLogShiftR;
+  float filmDevLogShiftG;
+  float filmDevLogShiftB;
+  float filmDevGammaR;
+  float filmDevGammaG;
+  float filmDevGammaB;
+  float filmDevFogR;
+  float filmDevFogG;
+  float filmDevFogB;
+  float filmDevDmaxR;
+  float filmDevDmaxG;
+  float filmDevDmaxB;
+  float printCallierQ;
+  uint printSplitGrade;
+  float printSoftGamma;
+  float printHardGamma;
+  float printSoftLogOffset;
+  float printHardLogOffset;
 };
 
 static bool spektra_color_adaptation_enabled(constant SpektraKernelParams &params, uint flag) {
@@ -313,14 +335,30 @@ static float spektra_rand01(uint seed) {
   return (float(spektra_hash(seed) & 0x00ffffffu) + 0.5) / 16777216.0;
 }
 
+// Tiled renders process a window of a larger frame: position-dependent math
+// (film coordinates, random fields) must use absolute frame coordinates.
+static float2 spektra_frame_dims(constant SpektraKernelParams &params, constant uint2 &dims) {
+  return params.frameWidth > 0u
+    ? float2(params.frameWidth, max(params.frameHeight, 1u))
+    : float2(max(dims.x, 1u), max(dims.y, 1u));
+}
+
+static float2 spektra_frame_pixel(uint2 gid, constant SpektraKernelParams &params) {
+  return float2(gid) + float2(float(params.frameOriginX), float(params.frameOriginY));
+}
+
+static uint2 spektra_frame_gid(uint2 gid, constant SpektraKernelParams &params) {
+  return uint2(int2(gid) + int2(params.frameOriginX, params.frameOriginY));
+}
+
 static float2 spektra_output_pixel_film_um(
   uint2 gid,
   constant SpektraKernelParams &params,
   constant uint2 &dims
 ) {
   const float scale = max(params.enlargerScale, 1.0);
-  const float2 safeDims = float2(max(dims.x, 1u), max(dims.y, 1u));
-  const float2 outputUv = (float2(gid) + 0.5) / safeDims;
+  const float2 safeDims = spektra_frame_dims(params, dims);
+  const float2 outputUv = (spektra_frame_pixel(gid, params) + 0.5) / safeDims;
   const float2 sourceUv = float2(0.5) +
     (outputUv - float2(0.5)) / scale +
     float2(params.enlargerOffsetXPercent, params.enlargerOffsetYPercent) * (0.01 / scale);
@@ -340,13 +378,13 @@ static int2 spektra_film_um_to_output_pixel(
   constant uint2 &dims
 ) {
   const float scale = max(params.enlargerScale, 1.0);
-  const float2 safeDims = float2(max(dims.x, 1u), max(dims.y, 1u));
+  const float2 safeDims = spektra_frame_dims(params, dims);
   const float framePixelSizeUm = max(params.filmPixelSizeUm * scale, 1.0e-6);
   const float2 sourceUv = filmUm / (safeDims * framePixelSizeUm);
   const float2 outputUv = float2(0.5) +
     (sourceUv - float2(0.5)) * scale -
     float2(params.enlargerOffsetXPercent, params.enlargerOffsetYPercent) * 0.01;
-  return int2(floor(outputUv * safeDims));
+  return int2(floor(outputUv * safeDims)) - int2(params.frameOriginX, params.frameOriginY);
 }
 
 static float spektra_film_format_mm(int format) {
@@ -374,6 +412,14 @@ static float spektra_film_format_mm(int format) {
 static float spektra_grain_final_blur_um(constant SpektraKernelParams &params) {
   const float formatScale = pow(max(spektra_film_format_mm(params.filmFormat) / 35.0, 1.0e-6), 0.62);
   return max(params.grainFinalBlurUm, 0.0) * formatScale;
+}
+
+// The multi-pass grain blurs density when this holds. Clamping density at zero before that blur
+// lifts the mean by an amount that depends on the noise per pixel, so render scales with few
+// particles per pixel came out lighter than the rest; the clamp then waits until after the blur.
+static bool spektra_grain_final_blur_applies(constant SpektraKernelParams &params) {
+  const float sigma = spektra_grain_final_blur_um(params) / max(params.filmPixelSizeUm, 1.0e-6);
+  return sigma > 0.0 && (params.grainSublayersEnabled != 0u || sigma > 0.4);
 }
 
 static float spektra_gaussian(uint seed) {
@@ -1012,7 +1058,8 @@ static float spektra_layer_particle_scale(uint layer, constant SpektraKernelPara
 static float3 spektra_apply_grain_controls(
   float3 baseDensity,
   float3 grainedDensity,
-  constant SpektraKernelParams &params
+  constant SpektraKernelParams &params,
+  float floorDensity = 0.0
 ) {
   const float amount = max(params.grainAmount, 0.0);
   const float saturation = clamp(params.grainSaturation, 0.0, 1.0);
@@ -1022,7 +1069,20 @@ static float3 spektra_apply_grain_controls(
   float3 delta = (grainedDensity - baseDensity) * amount;
   const float neutral = (delta.r + delta.g + delta.b) / 3.0;
   delta = mix(float3(neutral), delta, saturation);
-  return max(baseDensity + delta, float3(0.0));
+  return max(baseDensity + delta, float3(floorDensity));
+}
+
+static float spektra_normal_pdf(float x) {
+  return 0.3989422804 * exp(-0.5 * x * x);
+}
+
+// Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7); Metal has no erf.
+static float spektra_normal_cdf(float x) {
+  const float z = fabs(x) * 0.7071067812;
+  const float t = 1.0 / (1.0 + 0.3275911 * z);
+  const float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+  const float erfz = 1.0 - poly * exp(-z * z);
+  return 0.5 * (1.0 + (x < 0.0 ? -erfz : erfz));
 }
 
 static float spektra_particle_developed_density(
@@ -1040,8 +1100,16 @@ static float spektra_particle_developed_density(
   const float expectedSeeds = safeParticles / saturation;
   const float expectedDeveloped = expectedSeeds * probability;
   const float variance = max(expectedSeeds * probability, 1.0e-6);
-  const float developed = clamp(expectedDeveloped + sqrt(variance) * spektra_gaussian(seed) * blurDamping, 0.0, expectedSeeds);
-  return developed * (safeDensityMax / safeParticles) * saturation;
+  const float sigma = max(sqrt(variance) * blurDamping, 1.0e-6);
+  const float developed = clamp(expectedDeveloped + sigma * spektra_gaussian(seed), 0.0, expectedSeeds);
+  // Clamping to [0, expectedSeeds] moves the mean, and by how much depends on the particles per
+  // pixel, so tiles and previews at other scales came out lighter or darker. Take the censored
+  // normal's mean back out so every scale averages to the expected density.
+  const float a = (0.0 - expectedDeveloped) / sigma;
+  const float b = (expectedSeeds - expectedDeveloped) / sigma;
+  const float censoredMean = expectedDeveloped * (spektra_normal_cdf(b) - spektra_normal_cdf(a)) +
+    sigma * (spektra_normal_pdf(a) - spektra_normal_pdf(b)) + expectedSeeds * (1.0 - spektra_normal_cdf(b));
+  return (developed + expectedDeveloped - censoredMean) * (safeDensityMax / safeParticles) * saturation;
 }
 
 static float spektra_density_curve_max(
@@ -1607,24 +1675,31 @@ static float3 spektra_develop_film_density(
 ) {
   const uint smoothInterpolation =
     spektra_color_adaptation_enabled(params, kSpektraColorAdaptationCurveSmoothing) ? 1u : 0u;
+  // Development modifiers (temperature / time / aging): per-channel speed shift,
+  // contrast, density scale and fog. Neutral values leave the curves untouched.
+  const float3 devShift = float3(params.filmDevLogShiftR, params.filmDevLogShiftG, params.filmDevLogShiftB);
+  const float3 devGamma = params.filmGamma * float3(params.filmDevGammaR, params.filmDevGammaG, params.filmDevGammaB);
+  const float3 devDmax = float3(params.filmDevDmaxR, params.filmDevDmaxG, params.filmDevDmaxB);
+  const float3 devFog = float3(params.filmDevFogR, params.filmDevFogG, params.filmDevFogB);
+  const float3 shiftedRaw = logRaw - devShift;
   if (params.filmPushPullMode == 1) {
-    const float3 lookupRaw = spektra_experimental_push_pull_log_raw(logRaw, params.filmPushPullStops);
+    const float3 lookupRaw = spektra_experimental_push_pull_log_raw(shiftedRaw, params.filmPushPullStops);
     const float3 density = float3(
-      spektra_interp_density_curve(lookupRaw.r, 0u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
-      spektra_interp_density_curve(lookupRaw.g, 1u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
-      spektra_interp_density_curve(lookupRaw.b, 2u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation)
+      spektra_interp_density_curve(lookupRaw.r, 0u, devGamma.r, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
+      spektra_interp_density_curve(lookupRaw.g, 1u, devGamma.g, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
+      spektra_interp_density_curve(lookupRaw.b, 2u, devGamma.b, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation)
     );
-    return density * float3(
+    return density * devDmax * float3(
       spektra_experimental_push_pull_density_gain(lookupRaw.r, 0u, params.filmPushPullStops),
       spektra_experimental_push_pull_density_gain(lookupRaw.g, 1u, params.filmPushPullStops),
       spektra_experimental_push_pull_density_gain(lookupRaw.b, 2u, params.filmPushPullStops)
-    );
+    ) + devFog;
   }
-  return float3(
-    spektra_interp_density_curve(logRaw.r, 0u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
-    spektra_interp_density_curve(logRaw.g, 1u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
-    spektra_interp_density_curve(logRaw.b, 2u, params.filmGamma, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation)
-  );
+  return devDmax * float3(
+    spektra_interp_density_curve(shiftedRaw.r, 0u, devGamma.r, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
+    spektra_interp_density_curve(shiftedRaw.g, 1u, devGamma.g, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation),
+    spektra_interp_density_curve(shiftedRaw.b, 2u, devGamma.b, curveInfo, logExposure, densityCurves, params.densityCurveLookupMode, smoothInterpolation)
+  ) + devFog;
 }
 
 static float spektra_filtered_enlarger_illuminant_with_filters(
@@ -1827,6 +1902,8 @@ static float3 spektra_print_raw_from_film_density(
   device const float *neutralPrintFilters,
   device const float *academyPrinterDensityData
 ) {
+  // Callier Q: a specular (condenser) enlarger sees silver density scaled up.
+  filmDensityCmy *= params.printCallierQ;
   float3 raw = float3(0.0);
   const float3 bypassedFilmDensityCmy = spektra_negative_bleach_bypass_dye_density(
     filmDensityCmy,
@@ -1886,6 +1963,8 @@ static float3 spektra_print_raw_from_film_density_cached(
   device const float4 *filteredEnlargerResponse,
   device const float *academyPrinterDensityData
 ) {
+  // Callier Q: a specular (condenser) enlarger sees silver density scaled up.
+  filmDensityCmy *= params.printCallierQ;
   if (params.printTiming != 1 &&
       params.spectralTransmittanceMode == 0u &&
       params.negativeBleachBypassAmount == 0.0 &&
@@ -2272,6 +2351,13 @@ static float3 spektra_develop_print_density(
 ) {
   const uint smoothInterpolation =
     spektra_color_adaptation_enabled(params, kSpektraColorAdaptationCurveSmoothing) ? 1u : 0u;
+  if (params.printSplitGrade != 0u) {
+    // Split-grade printing: soft and hard exposures add as light on the paper.
+    // Each is a grade-specific gamma about mid-grey, offset by log10(t / tref).
+    const float3 soft = exp10(params.printSoftGamma * (logRaw + params.printSoftLogOffset));
+    const float3 hard = exp10(params.printHardGamma * (logRaw + params.printHardLogOffset));
+    logRaw = log10(max(soft + hard, float3(1.0e-10)));
+  }
   const float3 density = float3(
     spektra_interp_density_curve(logRaw.r, 0u, params.printGamma, paperCurveInfo, paperLogExposure, paperDensityCurves, params.densityCurveLookupMode, smoothInterpolation),
     spektra_interp_density_curve(logRaw.g, 1u, params.printGamma, paperCurveInfo, paperLogExposure, paperDensityCurves, params.densityCurveLookupMode, smoothInterpolation),
@@ -2950,6 +3036,38 @@ static float spektra_layer_density_max_total(
   return max(total, 1.0e-6);
 }
 
+// Grain noise is independent per pixel, and the final blur that follows is a sampled Gaussian:
+// fine at the full size, but on a reduced detail level or the proxy (sigma of a pixel or less, or
+// skipped below 0.4 px) it smooths far less than the same blur over the film would. This scales
+// the noise so a pixel at any render scale keeps the variance of the continuous blur averaged
+// over its area, and zoom levels shown side by side carry the same grain.
+static float spektra_grain_level_damping(constant SpektraKernelParams &params) {
+  const float p = max(params.filmPixelSizeUm, 1.0e-6);
+  const float blurUm = spektra_grain_final_blur_um(params);
+  if (blurUm <= 0.0) {
+    return 1.0;
+  }
+  // Per axis: a pixel-wide box of white noise blurred by G(blurUm), relative to the box alone.
+  const float s = 1.4142135624 * blurUm;
+  const float r = p / s;
+  const float continuous = max(2.0 / p * (p * (spektra_normal_cdf(r) - 0.5) - s * (spektra_normal_pdf(0.0) - spektra_normal_pdf(r))), 1.0e-6);
+  // What the sampled kernel in grain_density_blur_x/y keeps per axis.
+  float sampled = 1.0;
+  const float sigma = blurUm / p;
+  if (spektra_grain_final_blur_applies(params)) {
+    const int radius = min(int(ceil(3.0 * sigma)), 64);
+    float sum = 0.0;
+    float sum2 = 0.0;
+    for (int offset = -radius; offset <= radius; ++offset) {
+      const float w = exp(-0.5 * float(offset * offset) / max(sigma * sigma, 1.0e-8));
+      sum += w;
+      sum2 += w * w;
+    }
+    sampled = sum2 / max(sum * sum, 1.0e-12);
+  }
+  return min(continuous / sampled, 1.0);
+}
+
 static float spektra_production_layer_particle_density(
   float3 filmDensityCmy,
   uint layer,
@@ -2966,6 +3084,7 @@ static float spektra_production_layer_particle_density(
   const float pixelArea = max(params.filmPixelSizeUm * params.filmPixelSizeUm, 1.0e-6);
   const float densityMin = spektra_channel_density_min(channel, params);
   const float uniformity = spektra_channel_uniformity(channel, params);
+  const float damping = spektra_grain_level_damping(params);
 
   if (params.grainSublayersEnabled == 0u) {
     if (layer != 0u) {
@@ -2988,11 +3107,11 @@ static float spektra_production_layer_particle_density(
         densityMax,
         particles,
         uniformity,
-        1.0,
+        damping,
         particleSeed
       );
     }
-    return max(accumulated / max(float(subLayerCount), 1.0) - densityMin, 0.0);
+    return accumulated / max(float(subLayerCount), 1.0) - densityMin;
   }
 
   const float densityMaxTotal = spektra_layer_density_max_total(channel, densityCurveLayerMaxima);
@@ -3026,7 +3145,7 @@ static float spektra_production_layer_particle_density(
     layerDensityMax,
     particles,
     uniformity,
-    1.0,
+    damping,
     particleSeed
   );
 }
@@ -6690,11 +6809,12 @@ kernel void spektrafilm_grain_resolve_density(
     return;
   }
   const uint index = gid.y * dims.x + gid.x;
+  const float floorDensity = spektra_grain_final_blur_applies(params) ? -1.0e30 : 0.0;
   if (params.grainSublayersEnabled == 0u) {
     densityOut[index] = float4(
-      max(layerIn[index * 9u], 0.0),
-      max(layerIn[index * 9u + 1u], 0.0),
-      max(layerIn[index * 9u + 2u], 0.0),
+      max(layerIn[index * 9u], floorDensity),
+      max(layerIn[index * 9u + 1u], floorDensity),
+      max(layerIn[index * 9u + 2u], floorDensity),
       source[index].a
     );
     return;
@@ -6711,7 +6831,7 @@ kernel void spektrafilm_grain_resolve_density(
     density.b += layerIn[index * 9u + layer * 3u + 2u];
   }
   density *= microIn[index].rgb;
-  densityOut[index] = float4(max(density - densityMin, float3(0.0)), source[index].a);
+  densityOut[index] = float4(max(density - densityMin, float3(floorDensity)), source[index].a);
 }
 
 kernel void spektrafilm_grain_density_blur_x(
@@ -6760,11 +6880,12 @@ kernel void spektrafilm_grain_density_blur_y(
   const uint index = gid.y * dims.x + gid.x;
   const float sigma = spektra_grain_final_blur_um(params) / max(params.filmPixelSizeUm, 1.0e-6);
   if (sigma <= 0.0 || (params.grainSublayersEnabled == 0u && sigma <= 0.4)) {
-    densityOut[index] = densityIn[index];
+    densityOut[index] = float4(max(densityIn[index].rgb, float3(0.0)), densityIn[index].a);
     return;
   }
   if (useRecurrence != 0u) {
-    densityOut[index] = spektra_scalar_gaussian_sample_y_limited(densityIn, dims.x, dims.y, gid, sigma, 64);
+    const float4 blurred = spektra_scalar_gaussian_sample_y_limited(densityIn, dims.x, dims.y, gid, sigma, 64);
+    densityOut[index] = float4(max(blurred.rgb, float3(0.0)), blurred.a);
     return;
   }
   const int radius = min(int(ceil(3.0 * sigma)), 64);
@@ -6775,7 +6896,8 @@ kernel void spektrafilm_grain_density_blur_y(
     value += weight * spektra_float4_buffer_sample(densityIn, dims.x, dims.y, int(gid.x), int(gid.y) + offset);
     weightSum += weight;
   }
-  densityOut[index] = value / max(weightSum, 1.0e-8);
+  value /= max(weightSum, 1.0e-8);
+  densityOut[index] = float4(max(value.rgb, float3(0.0)), value.a);
 }
 
 kernel void spektrafilm_grain_apply_controls(
@@ -6793,7 +6915,7 @@ kernel void spektrafilm_grain_apply_controls(
   const float4 base = baseDensity[index];
   const float4 grained = grainedDensity[index];
   densityOut[index] = float4(
-    spektra_apply_grain_controls(base.rgb, grained.rgb, params),
+    spektra_apply_grain_controls(base.rgb, grained.rgb, params, spektra_grain_final_blur_applies(params) ? -1.0e30 : 0.0),
     grained.a
   );
 }
@@ -7265,7 +7387,7 @@ kernel void spektrafilm_print_glare_generate(
   const uint index = gid.y * dims.x + gid.x;
   const float mean = max(params.glarePercent, 0.0);
   const float stddev = max(params.glareRoughness, 0.0) * mean;
-  const float amount = spektra_lognormal_from_mean_std(mean, stddev, gid, params.grainSeed);
+  const float amount = spektra_lognormal_from_mean_std(mean, stddev, spektra_frame_gid(gid, params), params.grainSeed);
   glareOut[index] = float4(amount, amount, amount, 1.0);
 }
 

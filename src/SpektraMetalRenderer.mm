@@ -7,13 +7,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -299,6 +303,28 @@ struct KernelParams {
   uint32_t spectralTransmittanceMode;
   uint32_t _padPerf0;
   float time;
+  int32_t frameOriginX;
+  int32_t frameOriginY;
+  uint32_t frameWidth;
+  uint32_t frameHeight;
+  float filmDevLogShiftR;
+  float filmDevLogShiftG;
+  float filmDevLogShiftB;
+  float filmDevGammaR;
+  float filmDevGammaG;
+  float filmDevGammaB;
+  float filmDevFogR;
+  float filmDevFogG;
+  float filmDevFogB;
+  float filmDevDmaxR;
+  float filmDevDmaxG;
+  float filmDevDmaxB;
+  float printCallierQ;
+  uint32_t printSplitGrade;
+  float printSoftGamma;
+  float printHardGamma;
+  float printSoftLogOffset;
+  float printHardLogOffset;
 };
 
 constexpr uint32_t kGrainSynthesisComponentCount = 9u;
@@ -468,6 +494,9 @@ struct StaticProfileResources {
   float cameraUvCutNm = 410.0f;
   bool cameraIrFilterEnabled = false;
   float cameraIrCutNm = 675.0f;
+  int32_t cameraColorFilter = 0;
+  int32_t sceneIlluminant = 0;
+  float sceneIlluminantAmount = 1.0f;
   PrintTimingMode processNegativePrintTiming = PrintTimingMode::FilteredEnlarger;
   float processNegativeFilterC = 0.0f;
   float processNegativeFilterMShift = 0.0f;
@@ -530,6 +559,9 @@ struct StaticProfileResources {
            cameraUvCutNm == params.cameraUvCutNm &&
            cameraIrFilterEnabled == params.cameraIrFilterEnabled &&
            cameraIrCutNm == params.cameraIrCutNm &&
+           cameraColorFilter == params.cameraColorFilter &&
+           sceneIlluminant == params.sceneIlluminant &&
+           (params.sceneIlluminant == 0 || sceneIlluminantAmount == params.sceneIlluminantAmount) &&
            processNegativeResponseValid &&
            filmCurves &&
            paperCurves &&
@@ -575,6 +607,9 @@ struct StaticProfileResources {
     cameraUvCutNm = 410.0f;
     cameraIrFilterEnabled = false;
     cameraIrCutNm = 675.0f;
+    cameraColorFilter = 0;
+    sceneIlluminant = 0;
+    sceneIlluminantAmount = 1.0f;
     filmCurves = nullptr;
     paperCurves = nullptr;
     curveInfo = {};
@@ -1075,6 +1110,24 @@ KernelParams toKernelParams(const RenderParams &params, double time, int32_t wid
   out.scannerUnsharpSigmaPx = std::max(params.scannerUnsharpRadiusUm, 0.0f) / std::max(out.filmPixelSizeUm, 1.0e-6f);
   out.scannerUnsharpAmount = params.scannerUnsharpAmount;
   out.time = static_cast<float>(time);
+  out.filmDevLogShiftR = params.filmDevLogShiftR;
+  out.filmDevLogShiftG = params.filmDevLogShiftG;
+  out.filmDevLogShiftB = params.filmDevLogShiftB;
+  out.filmDevGammaR = params.filmDevGammaR;
+  out.filmDevGammaG = params.filmDevGammaG;
+  out.filmDevGammaB = params.filmDevGammaB;
+  out.filmDevFogR = params.filmDevFogR;
+  out.filmDevFogG = params.filmDevFogG;
+  out.filmDevFogB = params.filmDevFogB;
+  out.filmDevDmaxR = params.filmDevDmaxR;
+  out.filmDevDmaxG = params.filmDevDmaxG;
+  out.filmDevDmaxB = params.filmDevDmaxB;
+  out.printCallierQ = params.printCallierQ;
+  out.printSplitGrade = params.printSplitGrade ? 1u : 0u;
+  out.printSoftGamma = params.printSoftGamma;
+  out.printHardGamma = params.printHardGamma;
+  out.printSoftLogOffset = params.printSoftLogOffset;
+  out.printHardLogOffset = params.printHardLogOffset;
   return out;
 }
 
@@ -1528,7 +1581,7 @@ std::vector<float> applyCameraBandPass(
   std::vector<float> filtered = linearSensitivity;
   if (!filmCurves.wavelengths ||
       filtered.size() < static_cast<size_t>(filmCurves.wavelengthCount) * 3u ||
-      (!params.cameraUvFilterEnabled && !params.cameraIrFilterEnabled)) {
+      (!params.cameraUvFilterEnabled && !params.cameraIrFilterEnabled && params.cameraColorFilter == 0)) {
     return filtered;
   }
 
@@ -1545,7 +1598,16 @@ std::vector<float> applyCameraBandPass(
     const float irTransmission = params.cameraIrFilterEnabled
       ? smoothErfEdge(wl, params.cameraIrCutNm, -kPythonIrTransitionNm)
       : 1.0f;
-    const float transmission = uvTransmission * irTransmission;
+    // Contrast filters for black-and-white film (Wratten 8 / 21 / 25 / 11 approximations).
+    float colorTransmission = 1.0f;
+    switch (params.cameraColorFilter) {
+      case 1: colorTransmission = smoothErfEdge(wl, 480.0f, 12.0f); break;
+      case 2: colorTransmission = smoothErfEdge(wl, 550.0f, 12.0f); break;
+      case 3: colorTransmission = smoothErfEdge(wl, 595.0f, 10.0f); break;
+      case 4: colorTransmission = 0.1f + 0.9f * smoothErfEdge(wl, 470.0f, 15.0f) * smoothErfEdge(wl, 590.0f, -15.0f); break;
+      default: break;
+    }
+    const float transmission = uvTransmission * irTransmission * colorTransmission;
     transmissionByWavelength[wavelength] = transmission;
     const uint32_t offset = wavelength * 3u;
     const float illuminant = filmCurves.referenceIlluminantSpectrum ? filmCurves.referenceIlluminantSpectrum[wavelength] : 1.0f;
@@ -1568,6 +1630,84 @@ std::vector<float> applyCameraBandPass(
     }
   }
   return filtered;
+}
+
+// Scene light source relative to the light the film is balanced for.
+// Spectra are analytic models written for this project (Planck's law plus Gaussian
+// emission lines), not measured tables: blackbody sources, cool-white and tri-band
+// fluorescent tubes (mercury lines + phosphor bands) and a high-pressure sodium lamp.
+float planckRelative(float wavelengthNm, float kelvin) {
+  constexpr double c2 = 1.4388e7; // nm*K
+  const double wl = std::max(static_cast<double>(wavelengthNm), 1.0);
+  const double x = c2 / (wl * static_cast<double>(kelvin));
+  const double value = std::pow(wl / 560.0, -5.0) / std::expm1(x);
+  const double ref = 1.0 / std::expm1(c2 / (560.0 * static_cast<double>(kelvin)));
+  return static_cast<float>(value / ref);
+}
+
+float gaussianBand(float wl, float centre, float sigma) {
+  const float d = (wl - centre) / sigma;
+  return std::exp(-0.5f * d * d);
+}
+
+float sceneIlluminantSpectrum(int32_t kind, float wl) {
+  switch (kind) {
+    case 1: return planckRelative(wl, 5500.0f);
+    case 2: return planckRelative(wl, 7500.0f);
+    case 3: return planckRelative(wl, 12000.0f);
+    case 4: return planckRelative(wl, 3200.0f);
+    case 5: return planckRelative(wl, 2700.0f);
+    case 6: return planckRelative(wl, 1900.0f);
+    case 7: // cool white fluorescent: halophosphate hump + mercury lines
+      return gaussianBand(wl, 562.0f, 40.0f) + 0.30f * gaussianBand(wl, 470.0f, 30.0f) +
+             0.30f * gaussianBand(wl, 405.0f, 3.0f) + 0.70f * gaussianBand(wl, 436.0f, 3.0f) +
+             0.90f * gaussianBand(wl, 546.0f, 3.0f) + 0.45f * gaussianBand(wl, 578.0f, 3.0f) + 0.03f;
+    case 8: // tri-band fluorescent: narrow rare-earth phosphor bands
+      return 0.06f + 0.55f * gaussianBand(wl, 436.0f, 4.0f) + 0.15f * gaussianBand(wl, 487.0f, 6.0f) +
+             1.00f * gaussianBand(wl, 545.0f, 5.0f) + 0.90f * gaussianBand(wl, 611.0f, 6.0f);
+    case 9: // high-pressure sodium: broadened D lines with wings
+      return 0.02f + gaussianBand(wl, 589.0f, 8.0f) + 0.35f * gaussianBand(wl, 595.0f, 30.0f) +
+             0.05f * gaussianBand(wl, 470.0f, 8.0f) + 0.08f * gaussianBand(wl, 819.0f, 6.0f);
+    default: return 1.0f;
+  }
+}
+
+std::vector<float> applySceneIlluminant(
+  const ProfileCurveSet &filmCurves,
+  const std::vector<float> &linearSensitivity,
+  const RenderParams &params
+) {
+  std::vector<float> lit = linearSensitivity;
+  const uint32_t count = filmCurves.wavelengthCount;
+  if (params.sceneIlluminant <= 0 || params.sceneIlluminantAmount <= 0.0f || !filmCurves.wavelengths ||
+      lit.size() < static_cast<size_t>(count) * 3u) {
+    return lit;
+  }
+  const char *balanceName = filmCurves.referenceIlluminant;
+  const bool tungstenBalanced = balanceName && balanceName[0] == 'T' && balanceName[1] == '\0';
+  const float balanceKelvin = tungstenBalanced ? 3200.0f : 5500.0f;
+  const float amount = std::clamp(params.sceneIlluminantAmount, 0.0f, 1.0f);
+  std::vector<float> transmission(count, 1.0f);
+  double numerator = 0.0;
+  double denominator = 0.0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const float wl = filmCurves.wavelengths[i];
+    const float ratio = sceneIlluminantSpectrum(params.sceneIlluminant, wl) /
+                        std::max(planckRelative(wl, balanceKelvin), 1.0e-6f);
+    transmission[i] = std::pow(std::max(ratio, 1.0e-6f), amount);
+    const float reference = filmCurves.referenceIlluminantSpectrum ? filmCurves.referenceIlluminantSpectrum[i] : 1.0f;
+    const double response = static_cast<double>(linearSensitivity[i * 3u + 1u]) * reference;
+    denominator += response;
+    numerator += response * transmission[i];
+  }
+  // Normalise on the green layer only, so exposure stays level and the colour cast remains.
+  const float norm = static_cast<float>(std::max(numerator / std::max(denominator, 1.0e-12), 1.0e-10));
+  for (uint32_t i = 0; i < count; ++i) {
+    for (uint32_t c = 0; c < 3u; ++c) {
+      lit[i * 3u + c] *= transmission[i] / norm;
+    }
+  }
+  return lit;
 }
 
 std::array<float, 9> makeMallettRawMatrixUnnormalized(
@@ -1602,6 +1742,14 @@ std::array<float, 9> makeMallettRawMatrix(
     value /= normalization;
   }
   return matrix;
+}
+
+// Runs body(i) for i in [0, count) across the CPU cores; each i must write its own outputs.
+template <typename Body>
+void parallelFor(uint32_t count, const Body &body) {
+  dispatch_apply_f(count, DISPATCH_APPLY_AUTO, const_cast<Body *>(&body), [](void *context, size_t index) {
+    (*static_cast<const Body *>(context))(static_cast<uint32_t>(index));
+  });
 }
 
 std::vector<float> makeHanatosRawResponse(
@@ -1662,7 +1810,7 @@ std::vector<float> makeHanatosRawResponse(
     return response;
   }
 
-  for (uint32_t x = 0; x < hanatos.width; ++x) {
+  parallelFor(hanatos.width, [&](uint32_t x) {
     for (uint32_t y = 0; y < hanatos.height; ++y) {
       float raw[3] = {0.0f, 0.0f, 0.0f};
       const size_t spectraOffset = (static_cast<size_t>(x) * hanatos.height + y) * hanatos.wavelengthCount;
@@ -1685,7 +1833,7 @@ std::vector<float> makeHanatosRawResponse(
       response[responseOffset + 1u] = raw[1];
       response[responseOffset + 2u] = raw[2];
     }
-  }
+  });
   return response;
 }
 
@@ -1823,21 +1971,31 @@ std::array<float, 3> sampleHanatosResponseBilinear(
   return out;
 }
 
-std::vector<float> remapHanatosResponseForInputGamutCompression(
+// Where each Hanatos LUT cell samples the uncompressed response after radial gamut compression
+// toward the film's reference white (x, y in LUT cells). It depends only on the film and the LUT
+// layout, and every response of a profile (camera, print, preflash) is remapped with it, so it is
+// computed once per film and shared by all renderers.
+std::shared_ptr<const std::vector<float>> hanatosGamutCompressionSamples(
   const ProfileCurveSet &filmCurves,
-  const std::vector<float> &baseResponse,
   const HanatosSpectraLutInfo &hanatos
 ) {
-  std::vector<float> remapped(baseResponse.size(), 0.0f);
-  if (hanatos.width < 2u || hanatos.height < 2u || baseResponse.size() < static_cast<size_t>(hanatos.width) * hanatos.height * 3u) {
-    return remapped;
+  static std::mutex mutex;
+  static std::unordered_map<const ProfileCurveSet *, std::shared_ptr<const std::vector<float>>> cache;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto found = cache.find(&filmCurves);
+    if (found != cache.end() && found->second->size() == static_cast<size_t>(hanatos.width) * hanatos.height * 2u) {
+      return found->second;
+    }
   }
   const std::array<float, 2> whiteXy = filmReferenceIlluminantXy(filmCurves);
   const std::vector<std::array<float, 2>> locus = spectralLocusXy(filmCurves);
   if (locus.size() < 4u) {
-    return baseResponse;
+    return nullptr;
   }
-  for (uint32_t x = 0; x < hanatos.width; ++x) {
+  auto samples = std::make_shared<std::vector<float>>(static_cast<size_t>(hanatos.width) * hanatos.height * 2u);
+  float *out = samples->data();
+  parallelFor(hanatos.width, [&](uint32_t x) {
     const float tx = static_cast<float>(x) / static_cast<float>(hanatos.width - 1u);
     const float rootTx = std::sqrt(std::max(tx, 0.0f));
     for (uint32_t y = 0; y < hanatos.height; ++y) {
@@ -1847,18 +2005,44 @@ std::vector<float> remapHanatosResponseForInputGamutCompression(
       const float oneMinusX = std::max(1.0f - compressedXy[0], 1.0e-10f);
       const float sampleTx = std::clamp(oneMinusX * oneMinusX, 0.0f, 1.0f);
       const float sampleTy = std::clamp(compressedXy[1] / oneMinusX, 0.0f, 1.0f);
+      const size_t offset = (static_cast<size_t>(x) * hanatos.height + y) * 2u;
+      out[offset] = sampleTx * static_cast<float>(hanatos.width - 1u);
+      out[offset + 1u] = sampleTy * static_cast<float>(hanatos.height - 1u);
+    }
+  });
+  std::lock_guard<std::mutex> lock(mutex);
+  cache[&filmCurves] = samples;
+  return samples;
+}
+
+std::vector<float> remapHanatosResponseForInputGamutCompression(
+  const ProfileCurveSet &filmCurves,
+  const std::vector<float> &baseResponse,
+  const HanatosSpectraLutInfo &hanatos
+) {
+  std::vector<float> remapped(baseResponse.size(), 0.0f);
+  if (hanatos.width < 2u || hanatos.height < 2u || baseResponse.size() < static_cast<size_t>(hanatos.width) * hanatos.height * 3u) {
+    return remapped;
+  }
+  const std::shared_ptr<const std::vector<float>> samples = hanatosGamutCompressionSamples(filmCurves, hanatos);
+  if (!samples) {
+    return baseResponse;
+  }
+  const float *sample = samples->data();
+  parallelFor(hanatos.width, [&](uint32_t x) {
+    for (uint32_t y = 0; y < hanatos.height; ++y) {
+      const size_t cell = static_cast<size_t>(x) * hanatos.height + y;
       const std::array<float, 3> sampled = sampleHanatosResponseBilinear(
         baseResponse,
         hanatos,
-        sampleTx * static_cast<float>(hanatos.width - 1u),
-        sampleTy * static_cast<float>(hanatos.height - 1u)
+        sample[cell * 2u],
+        sample[cell * 2u + 1u]
       );
-      const size_t offset = (static_cast<size_t>(x) * hanatos.height + y) * 3u;
-      remapped[offset] = sampled[0];
-      remapped[offset + 1u] = sampled[1];
-      remapped[offset + 2u] = sampled[2];
+      remapped[cell * 3u] = sampled[0];
+      remapped[cell * 3u + 1u] = sampled[1];
+      remapped[cell * 3u + 2u] = sampled[2];
     }
-  }
+  });
   return remapped;
 }
 
@@ -1902,7 +2086,7 @@ std::vector<float> makeHanatosResponsePairFromWeights(
       spectralWeights.size() < static_cast<size_t>(hanatos.wavelengthCount) * 3u) {
     return response;
   }
-  for (uint32_t x = 0; x < hanatos.width; ++x) {
+  parallelFor(hanatos.width, [&](uint32_t x) {
     for (uint32_t y = 0; y < hanatos.height; ++y) {
       float raw[3] = {0.0f, 0.0f, 0.0f};
       const size_t spectraOffset = (static_cast<size_t>(x) * hanatos.height + y) * hanatos.wavelengthCount;
@@ -1918,7 +2102,7 @@ std::vector<float> makeHanatosResponsePairFromWeights(
       response[responseOffset + 1u] = raw[1];
       response[responseOffset + 2u] = raw[2];
     }
-  }
+  });
 
   std::vector<float> compressed = remapHanatosResponseForInputGamutCompression(referenceCurves, response, hanatos);
   std::vector<float> packed;
@@ -2043,6 +2227,31 @@ float interpLinear(const std::vector<float> &x, const float *y, uint32_t channel
   return value;
 }
 
+// Scale for a DIR coupler matrix m[donor * 3 + receiver] that keeps the curve
+// inversion log_exposure_0 = log_exposure - silver @ m monotonic (slope at least
+// kDirInversionMinSlope): steep datasheet curves (gradient > ~1.1) would otherwise
+// fold it and corrupt the corrected curves. 1 when the matrix is already safe.
+float dirInversionScale(const ProfileCurveSet &filmCurves, const float *m, bool positive) {
+  constexpr float kDirInversionMinSlope = 0.25f;
+  float worst = 0.0f;
+  for (uint32_t i = 0; i + 1u < filmCurves.exposureCount; ++i) {
+    const float dle = filmCurves.logExposure[i + 1u] - filmCurves.logExposure[i];
+    if (!(std::abs(dle) > 1.0e-9f)) {
+      continue;
+    }
+    float gradient[3];
+    for (uint32_t donor = 0; donor < 3u; ++donor) {
+      const float dd = filmCurves.densityCurves[(i + 1u) * 3u + donor] - filmCurves.densityCurves[i * 3u + donor];
+      gradient[donor] = (positive ? -dd : dd) / dle;
+    }
+    for (uint32_t receiver = 0; receiver < 3u; ++receiver) {
+      const float fold = gradient[0] * m[receiver] + gradient[1] * m[3u + receiver] + gradient[2] * m[6u + receiver];
+      worst = std::max(worst, fold);
+    }
+  }
+  return worst > 1.0f - kDirInversionMinSlope ? (1.0f - kDirInversionMinSlope) / worst : 1.0f;
+}
+
 KernelDirInfo makeDirInfo(const ProfileCurveSet &filmCurves, const RenderParams &params) {
   const float amount = std::max(params.dirCouplersAmount, 0.0f);
   const float sameLayer = std::max(params.dirCouplersInhibitionSameLayer, 0.0f);
@@ -2057,6 +2266,15 @@ KernelDirInfo makeDirInfo(const ProfileCurveSet &filmCurves, const RenderParams 
   info.matrix12 = params.dirCouplersGammaGToB * interlayer * amount;
   info.matrix20 = params.dirCouplersGammaBToR * interlayer * amount;
   info.matrix21 = params.dirCouplersGammaBToG * interlayer * amount;
+  {
+    float m[9] = {info.matrix00, info.matrix01, info.matrix02, info.matrix10, info.matrix11,
+                  info.matrix12, info.matrix20, info.matrix21, info.matrix22};
+    const float scale = dirInversionScale(filmCurves, m, std::strcmp(filmCurves.type, "positive") == 0);
+    for (float *v : {&info.matrix00, &info.matrix01, &info.matrix02, &info.matrix10, &info.matrix11,
+                     &info.matrix12, &info.matrix20, &info.matrix21, &info.matrix22}) {
+      *v *= scale;
+    }
+  }
   for (uint32_t channel = 0; channel < 3u; ++channel) {
     float maximum = 0.0f;
     for (uint32_t i = 0; i < filmCurves.exposureCount; ++i) {
@@ -2710,6 +2928,14 @@ struct MetalRenderer::Impl {
   std::vector<float> hanatosSpectraData;
   std::vector<float> outputGamutCompressionData;
   StaticProfileResources staticResources;
+  // Profile resources by film/paper/camera setup, most recently used first: switching back to a
+  // stock (thumbnails cycle through all of them) skips rebuilding and re-uploading its tables.
+  std::vector<StaticProfileResources> staticResourceCache;
+  static constexpr size_t kStaticResourceCacheCapacity = 64u;
+  // Tables that do not depend on the profile, shared by every cache entry.
+  std::unordered_map<const void *, id<MTLBuffer>> profileIndependentBuffers;
+  // While a profile is prepared its uploads go into one command buffer, waited on once.
+  id<MTLCommandBuffer> staticUploadCommandBuffer = nil;
   std::vector<id<MTLBuffer>> scratchBuffers;
   std::vector<id<MTLTexture>> scratchTextures;
   std::vector<float> autoExposureLuminance;
@@ -2719,6 +2945,46 @@ struct MetalRenderer::Impl {
   MetalRenderDiagnostics diagnostics{};
   std::unordered_map<const void *, std::string> pipelineNames;
   std::mutex renderMutex;
+  std::mutex tiledRenderMutex;
+  // Set while render() drives renderSingle() over the tiles of a larger frame.
+  struct TileFrame {
+    bool active = false;
+    int32_t frameX1 = 0;
+    int32_t frameY1 = 0;
+    int32_t frameWidth = 0;
+    int32_t frameHeight = 0;
+    bool autoExposureFixed = false;
+    float autoExposureEv = 0.0f;
+  } tileFrame;
+  // Working memory one render may use; 0 derives it from the device.
+  uint64_t memoryBudgetBytes = 0;
+  // Share of GPU time a render may take; set from any thread.
+  std::atomic<float> gpuDuty{1.0f};
+
+  // Pixels one renderSingle() may cover. Scratch is ~420 bytes per pixel, and
+  // the app runs several renderers sharing the GPU working set and system
+  // memory, so each takes a quarter of the smaller of the two by default.
+  int64_t tilePixelsForBudget() const {
+    uint64_t budget = memoryBudgetBytes;
+    if (budget == 0) {
+      uint64_t limit = [[NSProcessInfo processInfo] physicalMemory];
+      if (device && [device respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
+        const uint64_t workingSet = static_cast<uint64_t>([device recommendedMaxWorkingSetSize]);
+        if (workingSet > 0) {
+          limit = std::min(limit, workingSet);
+        }
+      }
+      budget = limit / 4u;
+    }
+    constexpr uint64_t kScratchBytesPerPixel = 420;
+    return std::clamp<int64_t>(static_cast<int64_t>(budget / kScratchBytesPerPixel), 2000000, 16000000);
+  }
+  // Page aligned so strip destinations can be wrapped by Metal without a copy.
+  struct AlignedFree {
+    void operator()(void *ptr) const { std::free(ptr); }
+  };
+  std::unique_ptr<unsigned char, AlignedFree> tileDestination;
+  size_t tileDestinationBytes = 0;
   bool preferPrivateScratch = true;
   bool passGpuTimingEnabled = false;
   bool useScannerTextures = false;
@@ -2776,22 +3042,36 @@ struct MetalRenderer::Impl {
     }
     id<MTLBuffer> privateBuffer = [device newBufferWithLength:length options:MTLResourceStorageModePrivate];
     id<MTLBuffer> uploadBuffer = [device newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> uploadCommandBuffer = [commandQueue commandBuffer];
+    id<MTLCommandBuffer> uploadCommandBuffer = staticUploadCommandBuffer ? staticUploadCommandBuffer : [commandQueue commandBuffer];
     id<MTLBlitCommandEncoder> blitEncoder = [uploadCommandBuffer blitCommandEncoder];
     if (!privateBuffer || !uploadBuffer || !uploadCommandBuffer || !blitEncoder) {
       return newSharedBuffer(bytes, length, name);
     }
     [blitEncoder copyFromBuffer:uploadBuffer sourceOffset:0 toBuffer:privateBuffer destinationOffset:0 size:length];
     [blitEncoder endEncoding];
-    [uploadCommandBuffer commit];
-    [uploadCommandBuffer waitUntilCompleted];
-    if ([uploadCommandBuffer status] == MTLCommandBufferStatusError) {
-      return newSharedBuffer(bytes, length, name);
+    if (!staticUploadCommandBuffer) {
+      [uploadCommandBuffer commit];
+      [uploadCommandBuffer waitUntilCompleted];
+      if ([uploadCommandBuffer status] == MTLCommandBufferStatusError) {
+        return newSharedBuffer(bytes, length, name);
+      }
     }
     diagnostics.staticAllocationBytes += length;
     diagnostics.staticAllocationCount += 1;
     diagnostics.uploadBytes += length;
     return privateBuffer;
+  }
+
+  id<MTLBuffer> profileIndependentBuffer(const void *key, const void *bytes, NSUInteger length, const char *name) {
+    __strong id<MTLBuffer> &buffer = profileIndependentBuffers[key];
+    if (!buffer) {
+      buffer = newStaticBuffer(bytes, length, name);
+    }
+    return buffer;
+  }
+
+  id<MTLBuffer> profileIndependentBuffer(const void *bytes, NSUInteger length, const char *name) {
+    return profileIndependentBuffer(bytes, bytes, length, name);
   }
 
   id<MTLBuffer> scratchBuffer(NSUInteger length, const char *name, MTLStorageMode storageMode) {
@@ -3059,6 +3339,14 @@ struct MetalRenderer::Impl {
     if (staticResources.validFor(params)) {
       return true;
     }
+    for (auto it = staticResourceCache.begin(); it != staticResourceCache.end(); ++it) {
+      if (it->validFor(params)) {
+        std::rotate(staticResourceCache.begin(), it, it + 1);
+        staticResources = staticResourceCache.front();
+        lastError.clear();
+        return true;
+      }
+    }
 
     staticResources.reset();
     const ProfileCurveSet *filmCurves = selectedFilmCurves(params);
@@ -3128,6 +3416,9 @@ struct MetalRenderer::Impl {
     next.cameraUvCutNm = params.cameraUvCutNm;
     next.cameraIrFilterEnabled = params.cameraIrFilterEnabled;
     next.cameraIrCutNm = params.cameraIrCutNm;
+    next.cameraColorFilter = params.cameraColorFilter;
+    next.sceneIlluminant = params.sceneIlluminant;
+    next.sceneIlluminantAmount = params.sceneIlluminantAmount;
     next.processNegativePrintTiming = params.printTiming;
     next.processNegativeFilterC = params.filterC;
     next.processNegativeFilterMShift = params.filterMShift;
@@ -3202,7 +3493,8 @@ struct MetalRenderer::Impl {
     );
 
     const std::vector<float> baseFilmSensitivityLinear = makeLinearSensitivity(filmCurves->logSensitivity, filmCurves->wavelengthCount);
-    const std::vector<float> filmSensitivityLinear = applyCameraBandPass(*filmCurves, baseFilmSensitivityLinear, params);
+    const std::vector<float> filmSensitivityLinear = applySceneIlluminant(
+      *filmCurves, applyCameraBandPass(*filmCurves, baseFilmSensitivityLinear, params), params);
     const std::vector<float> paperSensitivityLinear = makeLinearSensitivity(paperCurves->logSensitivity, paperCurves->wavelengthCount);
     const std::vector<float> processNegativePaperWeights = makeProcessNegativePaperWeights(
       *paperCurves,
@@ -3289,6 +3581,7 @@ struct MetalRenderer::Impl {
       bandpassHanatosData = unityHanatosBandpass.data();
     }
 
+    staticUploadCommandBuffer = commandQueue ? [commandQueue commandBuffer] : nil;
     next.curveInfoBuffer = newStaticBuffer(&next.curveInfo, sizeof(next.curveInfo), "film curve info");
     next.logExposureBuffer = newStaticBuffer(filmCurveExposure.data(), logExposureBytes, "film curve exposure");
     next.densityCurvesBuffer = newStaticBuffer(filmCurves->densityCurves, densityCurveBytes, "film density curves");
@@ -3303,8 +3596,8 @@ struct MetalRenderer::Impl {
     next.inputToReferenceXyzBuffer = newStaticBuffer(filmCurves->inputToReferenceXyz, inputMatrixBytes, "input to reference XYZ");
     next.inputToSrgbBuffer = newStaticBuffer(filmCurves->inputToSrgb, inputMatrixBytes, "input to sRGB");
     next.colorInfoBuffer = newStaticBuffer(&next.colorInfo, sizeof(next.colorInfo), "color info");
-    next.colorDecodeLutBuffer = newStaticBuffer(colorDecodeLuts(), transferLutBytes, "color decode LUT");
-    next.colorTransferKindBuffer = newStaticBuffer(colorTransferKinds(), transferKindBytes, "color transfer kind");
+    next.colorDecodeLutBuffer = profileIndependentBuffer(colorDecodeLuts(), transferLutBytes, "color decode LUT");
+    next.colorTransferKindBuffer = profileIndependentBuffer(colorTransferKinds(), transferKindBytes, "color transfer kind");
     next.paperCurveInfoBuffer = newStaticBuffer(&next.paperCurveInfo, sizeof(next.paperCurveInfo), "paper curve info");
     next.paperLogExposureBuffer = newStaticBuffer(paperCurveExposure.data(), paperLogExposureBytes, "paper curve exposure");
     next.paperDensityCurvesBuffer = newStaticBuffer(paperCurves->densityCurves, paperDensityCurveBytes, "paper density curves");
@@ -3312,10 +3605,10 @@ struct MetalRenderer::Impl {
     next.filmBaseDensityBuffer = newStaticBuffer(filmCurves->baseDensity, baseDensityBytes, "film base density");
     next.filmSpectralDensityBuffer = newStaticBuffer(filmSpectralDensity.data(), filmSpectralDensity.size() * sizeof(float), "packed film spectral density");
     next.paperLogSensitivityBuffer = newStaticBuffer(paperSensitivityLinear.data(), sensitivityBytes, "paper linear sensitivity");
-    next.thKg3IlluminantBuffer = newStaticBuffer(thKg3Illuminant(), baseDensityBytes, "TH-KG3 illuminant");
-    next.customEnlargerFiltersBuffer = newStaticBuffer(customEnlargerFilters(), sensitivityBytes, "custom enlarger filters");
-    next.neutralPrintFiltersBuffer = newStaticBuffer(neutralPrintFilters(), neutralPrintFilterBytes, "neutral print filters");
-    next.academyPrinterDensityDataBuffer = newStaticBuffer(
+    next.thKg3IlluminantBuffer = profileIndependentBuffer(thKg3Illuminant(), baseDensityBytes, "TH-KG3 illuminant");
+    next.customEnlargerFiltersBuffer = profileIndependentBuffer(customEnlargerFilters(), sensitivityBytes, "custom enlarger filters");
+    next.neutralPrintFiltersBuffer = profileIndependentBuffer(neutralPrintFilters(), neutralPrintFilterBytes, "neutral print filters");
+    next.academyPrinterDensityDataBuffer = profileIndependentBuffer(
       academyPrinterDensityData(),
       sensitivityBytes + neutralPrintFilterBytes,
       "Academy printer density data"
@@ -3325,8 +3618,19 @@ struct MetalRenderer::Impl {
     next.scanIlluminantsAndCmfsBuffer = newStaticBuffer(scanIlluminantsAndCmfs.data(), scanIlluminantsAndCmfs.size() * sizeof(float), "scan illuminants and CMFs");
     next.scanProductsBuffer = newStaticBuffer(scanProducts.data(), scanProducts.size() * sizeof(float), "scan CMF products and inverse normalizations");
     next.scanToOutputRgbDataBuffer = newStaticBuffer(scanToOutputRgbData.data(), scanToOutputRgbData.size() * sizeof(float), "scan output matrices");
-    next.colorEncodeLutBuffer = newStaticBuffer(colorEncodeAndGamutData.data(), colorEncodeAndGamutData.size() * sizeof(float), "color encode LUT and output gamut compression");
+    next.colorEncodeLutBuffer = profileIndependentBuffer(colorEncodeLuts(), colorEncodeAndGamutData.data(), colorEncodeAndGamutData.size() * sizeof(float), "color encode LUT and output gamut compression");
 
+    if (staticUploadCommandBuffer) {
+      id<MTLCommandBuffer> uploads = staticUploadCommandBuffer;
+      staticUploadCommandBuffer = nil;
+      [uploads commit];
+      [uploads waitUntilCompleted];
+      if ([uploads status] == MTLCommandBufferStatusError) {
+        lastError = "Unable to upload static Metal resources.";
+        profileIndependentBuffers.clear();
+        return false;
+      }
+    }
     if (!next.validFor(params)) {
       if (lastError.empty()) {
         lastError = "Unable to create static Metal resources.";
@@ -3334,6 +3638,10 @@ struct MetalRenderer::Impl {
       return false;
     }
     staticResources = next;
+    staticResourceCache.insert(staticResourceCache.begin(), next);
+    if (staticResourceCache.size() > kStaticResourceCacheCapacity) {
+      staticResourceCache.pop_back();
+    }
     lastError.clear();
     return true;
   }
@@ -3850,7 +4158,306 @@ std::unique_ptr<Renderer> createNativeRenderer() {
   return std::make_unique<MetalRenderer>();
 }
 
+namespace {
+
+const char *tilingEnv(const char *name) {
+  const char *value = std::getenv(name);
+  return value && *value ? value : nullptr;
+}
+
+} // namespace
+
 bool MetalRenderer::render(
+  const ImageView &source,
+  const MutableImageView &destination,
+  const RenderWindow &window,
+  const RenderParams &params,
+  double time
+) {
+  const int32_t width = window.x2 - window.x1;
+  const int32_t height = window.y2 - window.y1;
+  const char *mode = tilingEnv("SPEKTRAFILM_TILING");
+  const bool tilingOff = mode && std::strcmp(mode, "off") == 0;
+  const bool tilingForced = mode && std::strcmp(mode, "force") == 0;
+  const int64_t pixels = static_cast<int64_t>(std::max(width, 0)) * static_cast<int64_t>(std::max(height, 0));
+  const int64_t tilePixels = tilePixelLimit();
+
+  // Tiles need every pass to be local (bounded blur support) and frame-global
+  // state computed once: the enlarger resamples the whole frame and the
+  // halation boost normalises by the frame maximum, so those stay untiled.
+  const bool externalMetal = gExternalMetalBufferContext && gExternalMetalBufferContext->active;
+  bool tileable = !tilingOff && !externalMetal && width > 0 && height > 0 &&
+    !enlargerTransformActive(params) && params.halationBoostEv <= 0.0f &&
+    (tilingForced || pixels > tilePixels + tilePixels / 2);
+  if (tileable && params.autoExposure &&
+      !contiguousFloatWindowPointer(source, window, width, height)) {
+    tileable = false;
+  }
+  if (!tileable) {
+    impl_->tileFrame = {};
+    return renderSingle(source, destination, window, params, time);
+  }
+
+  const int32_t overlap = tileOverlap(params, width, height);
+  const int32_t tileRows = static_cast<int32_t>(std::clamp<int64_t>(tilePixels / std::max(width, 1), 64, height));
+  return renderTiled(source, destination, window, window, params, time, tileRows, overlap);
+}
+
+int64_t MetalRenderer::tilePixelLimit() const {
+  const char *mpixEnv = tilingEnv("SPEKTRAFILM_TILE_MPIX");
+  if (mpixEnv || !impl_) {
+    return static_cast<int64_t>(std::clamp(mpixEnv ? std::atof(mpixEnv) : 16.0, 0.25, 256.0) * 1.0e6);
+  }
+  return impl_->tilePixelsForBudget();
+}
+
+int32_t MetalRenderer::tileOverlap(const RenderParams &params, int32_t width, int32_t height) const {
+  const float pixelSizeUm = filmFormatMm(params.filmFormat) * 1000.0f /
+    static_cast<float>(std::max(std::max(width, height), 1));
+  // 1 mm of film covers the chained halation, DIR-tail and grain blur support:
+  // strips match an untiled render to float precision (custom blur kernels;
+  // MPS blurs differ by <1e-3 because MPS picks its own kernel per size).
+  const char *overlapEnv = tilingEnv("SPEKTRAFILM_TILE_OVERLAP_UM");
+  const float overlapUm = std::max(overlapEnv ? static_cast<float>(std::atof(overlapEnv)) : 1000.0f, 0.0f);
+  return static_cast<int32_t>(std::ceil(overlapUm / std::max(pixelSizeUm, 1.0e-3f)));
+}
+
+void MetalRenderer::setGpuDutyCycle(float duty) {
+  if (impl_) {
+    impl_->gpuDuty.store(std::clamp(duty, 0.1f, 1.0f));
+  }
+}
+
+void MetalRenderer::setMemoryBudgetBytes(uint64_t bytes) {
+  if (impl_) {
+    std::lock_guard<std::mutex> renderLock(impl_->renderMutex);
+    impl_->memoryBudgetBytes = bytes;
+  }
+}
+
+bool MetalRenderer::renderRegion(
+  const ImageView &source,
+  const MutableImageView &destination,
+  const RenderWindow &window,
+  const RenderWindow &region,
+  const RenderParams &params,
+  double time
+) {
+  if (!isAvailable()) {
+    return false;
+  }
+  const RenderWindow clipped{
+    std::max(region.x1, window.x1), std::max(region.y1, window.y1),
+    std::min(region.x2, window.x2), std::min(region.y2, window.y2)};
+  if (clipped.x1 >= clipped.x2 || clipped.y1 >= clipped.y2) {
+    return true;
+  }
+  const int32_t width = window.x2 - window.x1;
+  const int32_t height = window.y2 - window.y1;
+  const bool externalMetal = gExternalMetalBufferContext && gExternalMetalBufferContext->active;
+  const bool local = !externalMetal && !enlargerTransformActive(params) && params.halationBoostEv <= 0.0f &&
+    (!params.autoExposure || contiguousFloatWindowPointer(source, window, width, height));
+  if (!local) {
+    // Frame-global passes: render the whole frame and keep the region.
+    const size_t pixelBytes = static_cast<size_t>(destination.components) *
+      static_cast<size_t>(destination.bytesPerComponent);
+    const size_t rowBytes = static_cast<size_t>(width) * pixelBytes;
+    const size_t pageBytes = 16384;
+    void *memory = nullptr;
+    if (posix_memalign(&memory, pageBytes, (rowBytes * static_cast<size_t>(height) + pageBytes - 1) / pageBytes * pageBytes) != 0 || !memory) {
+      impl_->lastError = "Could not allocate the region render frame buffer.";
+      return false;
+    }
+    std::unique_ptr<unsigned char, Impl::AlignedFree> frame(static_cast<unsigned char *>(memory));
+    MutableImageView full = destination;
+    full.data = frame.get();
+    full.x1 = window.x1;
+    full.y1 = window.y1;
+    full.width = width;
+    full.height = height;
+    full.rowBytes = static_cast<int32_t>(rowBytes);
+    if (!render(source, full, window, params, time)) {
+      return false;
+    }
+    for (int32_t y = clipped.y1; y < clipped.y2; ++y) {
+      std::memcpy(
+        static_cast<unsigned char *>(destination.data) +
+          static_cast<size_t>(y - destination.y1) * static_cast<size_t>(destination.rowBytes) +
+          static_cast<size_t>(clipped.x1 - destination.x1) * pixelBytes,
+        frame.get() + static_cast<size_t>(y - window.y1) * rowBytes +
+          static_cast<size_t>(clipped.x1 - window.x1) * pixelBytes,
+        static_cast<size_t>(clipped.x2 - clipped.x1) * pixelBytes);
+    }
+    return true;
+  }
+  const int32_t overlap = tileOverlap(params, width, height);
+  const int32_t workWidth = std::min(width, clipped.x2 - clipped.x1 + 2 * overlap + 64);
+  const int32_t tileRows = static_cast<int32_t>(
+    std::clamp<int64_t>(tilePixelLimit() / std::max(workWidth, 1), 64, clipped.y2 - clipped.y1));
+  return renderTiled(source, destination, window, clipped, params, time, tileRows, overlap);
+}
+
+bool MetalRenderer::renderTiled(
+  const ImageView &source,
+  const MutableImageView &destination,
+  const RenderWindow &window,
+  const RenderWindow &region,
+  const RenderParams &params,
+  double time,
+  int32_t tileRows,
+  int32_t overlap
+) {
+  std::lock_guard<std::mutex> tiledLock(impl_->tiledRenderMutex);
+  const int32_t width = window.x2 - window.x1;
+  const int32_t height = window.y2 - window.y1;
+  const int32_t regionWidth = region.x2 - region.x1;
+  const int32_t regionHeight = region.y2 - region.y1;
+  const int32_t tileCount = (regionHeight + tileRows - 1) / tileRows;
+  // Balance strip heights so the last strip is not a sliver. Strip and
+  // working-window starts stay on a coarse grid of the frame so downsampled
+  // blur pyramids sample the same frame pixels as an untiled render.
+  constexpr int32_t kRowAlign = 64;
+  const int32_t stripRows = ((regionHeight + tileCount - 1) / tileCount + kRowAlign - 1) / kRowAlign * kRowAlign;
+  // Strips span the region's columns plus the overlap (the whole frame width
+  // when the region is the frame).
+  const int32_t workX1 = window.x1 + std::max(0, (region.x1 - window.x1 - overlap) / kRowAlign * kRowAlign);
+  const int32_t workX2 = std::min(window.x2, region.x2 + overlap);
+  const int32_t workWidth = workX2 - workX1;
+
+  Impl::TileFrame frame;
+  frame.active = true;
+  frame.frameX1 = window.x1;
+  frame.frameY1 = window.y1;
+  frame.frameWidth = width;
+  frame.frameHeight = height;
+  if (params.autoExposure) {
+    std::vector<float> luminance;
+    frame.autoExposureEv = measureAutoExposureEv(
+      static_cast<const float *>(contiguousFloatWindowPointer(source, window, width, height)),
+      width,
+      height,
+      params,
+      luminance
+    );
+    frame.autoExposureFixed = true;
+  }
+
+  // Full-width strips keep the source contiguous so each strip's source can
+  // be wrapped without a staging copy. Each strip renders its rows plus the
+  // overlap into a scratch destination; only the core rows are kept.
+  const size_t pixelBytes = static_cast<size_t>(destination.components) *
+    static_cast<size_t>(destination.bytesPerComponent);
+  const size_t rowBytes = static_cast<size_t>(workWidth) * pixelBytes;
+  const size_t coreBytes = static_cast<size_t>(regionWidth) * pixelBytes;
+  const int32_t maxWorkingRows = std::min(height, stripRows + 2 * overlap + 64);
+  const size_t pageBytes = 16384;
+  const size_t scratchBytes = (rowBytes * static_cast<size_t>(maxWorkingRows) + pageBytes - 1) / pageBytes * pageBytes;
+  if (impl_->tileDestinationBytes < scratchBytes) {
+    void *memory = nullptr;
+    if (posix_memalign(&memory, pageBytes, scratchBytes) != 0 || !memory) {
+      impl_->lastError = "Could not allocate the tiled render strip buffer.";
+      return false;
+    }
+    impl_->tileDestination.reset(static_cast<unsigned char *>(memory));
+    impl_->tileDestinationBytes = scratchBytes;
+  }
+
+  RendererDiagnostics total;
+  std::vector<RendererTileDiagnostics> tiles;
+  bool ok = true;
+  for (int32_t index = 0; index < tileCount && ok; ++index) {
+    const int32_t coreY1 = region.y1 + index * stripRows;
+    const int32_t coreY2 = std::min(region.y2, coreY1 + stripRows);
+    if (coreY1 >= coreY2) {
+      break;
+    }
+    const int32_t workY1 = window.y1 + std::max(0, (coreY1 - window.y1 - overlap) / kRowAlign * kRowAlign);
+    const int32_t workY2 = std::min(window.y2, coreY2 + overlap);
+    const RenderWindow workWindow{workX1, workY1, workX2, workY2};
+
+    MutableImageView scratch;
+    scratch.data = impl_->tileDestination.get();
+    scratch.x1 = workX1;
+    scratch.y1 = workY1;
+    scratch.width = workWidth;
+    scratch.height = workY2 - workY1;
+    scratch.rowBytes = static_cast<int32_t>(rowBytes);
+    scratch.components = destination.components;
+    scratch.bytesPerComponent = destination.bytesPerComponent;
+
+    impl_->tileFrame = frame;
+    ok = renderSingle(source, scratch, workWindow, params, time);
+    impl_->tileFrame = {};
+    if (!ok) {
+      break;
+    }
+
+    const auto copyStart = PerfClock::now();
+    const int32_t destinationX = region.x1 - destination.x1;
+    for (int32_t y = coreY1; y < coreY2; ++y) {
+      const unsigned char *from = impl_->tileDestination.get() +
+        static_cast<size_t>(y - workY1) * rowBytes +
+        static_cast<size_t>(region.x1 - workX1) * pixelBytes;
+      unsigned char *to = static_cast<unsigned char *>(destination.data) +
+        static_cast<size_t>(y - destination.y1) * static_cast<size_t>(destination.rowBytes) +
+        static_cast<size_t>(destinationX) * pixelBytes;
+      std::memcpy(to, from, coreBytes);
+    }
+    const double copyMs = elapsedMilliseconds(copyStart, PerfClock::now());
+
+    const RendererDiagnostics &d = impl_->diagnostics;
+    if (index == 0) {
+      total = d;
+    } else {
+      total.cpuSetupMs += d.cpuSetupMs;
+      total.sourceCopyMs += d.sourceCopyMs;
+      total.commandEncodingMs += d.commandEncodingMs;
+      total.commandBufferMs += d.commandBufferMs;
+      total.gpuCommandBufferMs += d.gpuCommandBufferMs;
+      total.outputCopyMs += d.outputCopyMs;
+      total.uploadBytes += d.uploadBytes;
+      total.passCount += d.passCount;
+      total.scratchAllocationBytes = std::max(total.scratchAllocationBytes, d.scratchAllocationBytes);
+      total.scratchAllocationCount = std::max(total.scratchAllocationCount, d.scratchAllocationCount);
+      total.metalCurrentAllocatedSize = std::max(total.metalCurrentAllocatedSize, d.metalCurrentAllocatedSize);
+      if (total.passes.size() == d.passes.size()) {
+        for (size_t p = 0; p < d.passes.size(); ++p) {
+          total.passes[p].gpuMs += d.passes[p].gpuMs;
+        }
+      }
+    }
+    total.outputCopyMs += copyMs;
+
+    RendererTileDiagnostics tile;
+    tile.index = static_cast<uint32_t>(index);
+    tile.outputX = region.x1;
+    tile.outputY = coreY1;
+    tile.outputWidth = regionWidth;
+    tile.outputHeight = coreY2 - coreY1;
+    tile.workingX = workX1;
+    tile.workingY = workY1;
+    tile.workingWidth = workWidth;
+    tile.workingHeight = workY2 - workY1;
+    tile.overlap = static_cast<uint32_t>(overlap);
+    tile.allocatedBytes = d.scratchAllocationBytes;
+    tile.submitMs = d.commandBufferMs;
+    tile.passCount = d.passCount;
+    tiles.push_back(tile);
+  }
+  if (!ok) {
+    return false;
+  }
+  total.tiledRendering = true;
+  total.tileCount = static_cast<uint32_t>(tiles.size());
+  total.tileWidth = static_cast<uint32_t>(workWidth);
+  total.tileHeight = static_cast<uint32_t>(stripRows);
+  total.tileOverlap = static_cast<uint32_t>(overlap);
+  total.tiles = std::move(tiles);
+  impl_->diagnostics = std::move(total);
+  return true;
+}
+
+bool MetalRenderer::renderSingle(
   const ImageView &source,
   const MutableImageView &destination,
   const RenderWindow &window,
@@ -3870,6 +4477,9 @@ bool MetalRenderer::render(
   if (width <= 0 || height <= 0) {
     return true;
   }
+  const Impl::TileFrame &tileFrame = impl_->tileFrame;
+  const int32_t referenceWidth = tileFrame.active ? tileFrame.frameWidth : width;
+  const int32_t referenceHeight = tileFrame.active ? tileFrame.frameHeight : height;
 
   std::lock_guard<std::mutex> renderLock(impl_->renderMutex);
   @autoreleasepool {
@@ -3994,7 +4604,7 @@ bool MetalRenderer::render(
     const NSUInteger grainLayerBytes = static_cast<NSUInteger>(width) * static_cast<NSUInteger>(height) * 9u * sizeof(float);
     const NSUInteger dirCorrectionBufferBBytes = dirTailPath && !dirTailMpsPath ? bufferBytes * 3u : bufferBytes;
     const float pixelSizeUm = filmFormatMm(params.filmFormat) * 1000.0f /
-      static_cast<float>(std::max(width, height)) / enlargerScale(params);
+      static_cast<float>(std::max(referenceWidth, referenceHeight)) / enlargerScale(params);
     const bool grainLayerBlurPath =
       (productionGrainPath || grainSynthesisPath) &&
       params.grainSublayersEnabled &&
@@ -4405,7 +5015,13 @@ bool MetalRenderer::render(
       impl_->diagnostics.uploadBytes += bufferBytes;
     }
 
-    KernelParams kernelParams = toKernelParams(params, time, width, height);
+    KernelParams kernelParams = toKernelParams(params, time, referenceWidth, referenceHeight);
+    if (tileFrame.active) {
+      kernelParams.frameOriginX = window.x1 - tileFrame.frameX1;
+      kernelParams.frameOriginY = window.y1 - tileFrame.frameY1;
+      kernelParams.frameWidth = static_cast<uint32_t>(tileFrame.frameWidth);
+      kernelParams.frameHeight = static_cast<uint32_t>(tileFrame.frameHeight);
+    }
     kernelParams.densityCurveLookupMode = static_cast<uint32_t>(impl_->densityCurveLookupMode);
     kernelParams.spectralTransmittanceMode = static_cast<uint32_t>(impl_->spectralTransmittanceMode);
     applyProfileHalationDefaults(kernelParams, params, *filmCurves);
@@ -4414,7 +5030,9 @@ bool MetalRenderer::render(
       96u
     );
     const std::array<KernelGaussianBlurInfo, 3> dirTailBlurInfos = makeDirTailBlurInfos(kernelParams);
-    if (params.autoExposure) {
+    if (params.autoExposure && tileFrame.autoExposureFixed) {
+      kernelParams.autoExposureEv = tileFrame.autoExposureEv;
+    } else if (params.autoExposure) {
       kernelParams.autoExposureEv = measureAutoExposureEv(
         static_cast<const float *>([srcBuffer contents]),
         width,
@@ -4575,8 +5193,49 @@ bool MetalRenderer::render(
       }
     };
 
+    // Throttled renders: about 4 ms of work per command buffer on a slow GPU, then a
+    // pause sized so the GPU is busy `duty` of the time. Pass boundaries are safe split
+    // points (the split timing mode below splits at every one).
+    const float gpuDuty = externalMetal ? 1.0f : impl_->gpuDuty.load();
+    constexpr uint64_t kThrottleChunkThreads = 4000000u;
+    uint64_t throttleThreads = 0;
+    auto throttle = [&](size_t passIndex) {
+      if (passIndex < impl_->diagnostics.passes.size()) {
+        const auto &pass = impl_->diagnostics.passes[passIndex];
+        throttleThreads += static_cast<uint64_t>(pass.width) * pass.height * std::max(pass.depth, 1u);
+      }
+      if (throttleThreads < kThrottleChunkThreads) {
+        return;
+      }
+      throttleThreads = 0;
+      const auto start = PerfClock::now();
+      [encoder endEncoding];
+      [commandBuffer commit];
+      [commandBuffer waitUntilCompleted];
+      if ([commandBuffer status] == MTLCommandBufferStatusError) {
+        NSError *error = [commandBuffer error];
+        impl_->lastError = error ? [[error localizedDescription] UTF8String] : "Metal command buffer failed.";
+        encodeFailed = true;
+        return;
+      }
+      const double busyMs = elapsedMilliseconds(start, PerfClock::now());
+      const double pauseMs = std::min(busyMs * (1.0 / gpuDuty - 1.0), 100.0);
+      if (pauseMs > 0.05) {
+        std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>(pauseMs * 1000.0)));
+      }
+      if (!beginCommandEncoder()) {
+        encodeFailed = true;
+      }
+    };
+
     auto finishSplitTimedPass = [&](size_t passIndex, PerfClock::time_point passStart) {
-      if (!useSplitPassTiming || encodeFailed) {
+      if (encodeFailed) {
+        return;
+      }
+      if (!useSplitPassTiming) {
+        if (gpuDuty < 0.999f) {
+          throttle(passIndex);
+        }
         return;
       }
       [encoder endEncoding];

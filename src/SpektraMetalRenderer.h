@@ -33,6 +33,8 @@ public:
   const MetalRenderDiagnostics &lastDiagnostics() const override;
   const std::string &lastError() const override;
   void releaseTransientResources() override;
+  void setMemoryBudgetBytes(uint64_t bytes) override;
+  void setGpuDutyCycle(float duty) override;
   bool startGpuTraceCapture(const std::string &path);
   void stopGpuTraceCapture();
 
@@ -40,6 +42,15 @@ public:
     const ImageView &source,
     const MutableImageView &destination,
     const RenderWindow &window,
+    const RenderParams &params,
+    double time
+  ) override;
+
+  bool renderRegion(
+    const ImageView &source,
+    const MutableImageView &destination,
+    const RenderWindow &window,
+    const RenderWindow &region,
     const RenderParams &params,
     double time
   ) override;
@@ -54,6 +65,27 @@ public:
   );
 
 private:
+  bool renderSingle(
+    const ImageView &source,
+    const MutableImageView &destination,
+    const RenderWindow &window,
+    const RenderParams &params,
+    double time
+  );
+  bool renderTiled(
+    const ImageView &source,
+    const MutableImageView &destination,
+    const RenderWindow &window,
+    const RenderWindow &region,
+    const RenderParams &params,
+    double time,
+    int32_t tileRows,
+    int32_t overlap
+  );
+
+  int64_t tilePixelLimit() const;
+  int32_t tileOverlap(const RenderParams &params, int32_t width, int32_t height) const;
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

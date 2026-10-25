@@ -387,6 +387,24 @@ bool applyParam(const std::string &keyRaw, const std::string &valueRaw, spektraf
     return fail();
   }
   if (key == "color_adaptation") return assignBool(params.colorAdaptation);
+  if (key == "film_format_mm") {
+    // Python's camera.film_format_mm; only the renderer's discrete gate sizes are available.
+    float mm = 0.0f;
+    if (!parseFloat(value, mm)) return fail();
+    static const std::pair<float, spektrafilm::FilmFormat> kFormats[] = {
+      {4.8f, spektrafilm::FilmFormat::Standard8}, {5.79f, spektrafilm::FilmFormat::Super8},
+      {10.26f, spektrafilm::FilmFormat::Standard16}, {12.52f, spektrafilm::FilmFormat::Super16},
+      {35.0f, spektrafilm::FilmFormat::Standard35}, {24.89f, spektrafilm::FilmFormat::Super35},
+      {52.48f, spektrafilm::FilmFormat::Standard65}, {70.41f, spektrafilm::FilmFormat::Imax70},
+    };
+    for (const auto &entry : kFormats) {
+      if (std::fabs(entry.first - mm) < 0.01f) {
+        params.filmFormat = entry.second;
+        return true;
+      }
+    }
+    return fail();
+  }
   if (key == "film" || key == "film_stock") {
     return findFilmIndex(value, params.film) || fail();
   }
@@ -724,6 +742,20 @@ int main(int argc, const char **argv) {
       return 2;
     }
 
+    if (std::getenv("SPEKTRAFILM_HARNESS_DIAG")) {
+      const auto &d = renderer.lastDiagnostics();
+      std::cerr << "diag cpuSetupMs=" << d.cpuSetupMs << " sourceCopyMs=" << d.sourceCopyMs
+                << " encodeMs=" << d.commandEncodingMs << " cmdBufMs=" << d.commandBufferMs
+                << " gpuMs=" << d.gpuCommandBufferMs << " outputCopyMs=" << d.outputCopyMs
+                << " passes=" << d.passCount << " tiled=" << d.tiledRendering << " tiles=" << d.tileCount
+                << " tile=" << d.tileWidth << "x" << d.tileHeight << " overlap=" << d.tileOverlap
+                << " scratchMB=" << d.scratchAllocationBytes / 1048576.0
+                << " device=" << d.metalDeviceName << "\n";
+      for (const auto &pd : d.passes) {
+        std::cerr << "pass " << pd.name << " " << pd.width << "x" << pd.height << "x" << pd.depth
+                  << " gpuMs=" << pd.gpuMs << "\n";
+      }
+    }
     std::cout << "stage=" << normalizedTag(options.stage)
               << "\nwidth=" << options.width
               << "\nheight=" << options.height

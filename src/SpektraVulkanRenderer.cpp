@@ -2525,6 +2525,31 @@ float interpLinearDensityCurve(
   return y0 + (y1 - y0) * t;
 }
 
+// Scale for a DIR coupler matrix m[donor * 3 + receiver] that keeps the curve
+// inversion log_exposure_0 = log_exposure - silver @ m monotonic (slope at least
+// kDirInversionMinSlope): steep datasheet curves (gradient > ~1.1) would otherwise
+// fold it and corrupt the corrected curves. 1 when the matrix is already safe.
+float dirInversionScale(const ProfileCurveSet &filmCurves, const float *m, bool positive) {
+  constexpr float kDirInversionMinSlope = 0.25f;
+  float worst = 0.0f;
+  for (uint32_t i = 0; i + 1u < filmCurves.exposureCount; ++i) {
+    const float dle = filmCurves.logExposure[i + 1u] - filmCurves.logExposure[i];
+    if (!(std::abs(dle) > 1.0e-9f)) {
+      continue;
+    }
+    float gradient[3];
+    for (uint32_t donor = 0; donor < 3u; ++donor) {
+      const float dd = filmCurves.densityCurves[(i + 1u) * 3u + donor] - filmCurves.densityCurves[i * 3u + donor];
+      gradient[donor] = (positive ? -dd : dd) / dle;
+    }
+    for (uint32_t receiver = 0; receiver < 3u; ++receiver) {
+      const float fold = gradient[0] * m[receiver] + gradient[1] * m[3u + receiver] + gradient[2] * m[6u + receiver];
+      worst = std::max(worst, fold);
+    }
+  }
+  return worst > 1.0f - kDirInversionMinSlope ? (1.0f - kDirInversionMinSlope) / worst : 1.0f;
+}
+
 std::array<float, kDirFloatCount> makeDirFloatParams(
   const ProfileCurveSet &filmCurves,
   const RenderParams &params,
@@ -2544,6 +2569,11 @@ std::array<float, kDirFloatCount> makeDirFloatParams(
   out[5] = params.dirCouplersGammaGToB * interlayer * amount;
   out[6] = params.dirCouplersGammaBToR * interlayer * amount;
   out[7] = params.dirCouplersGammaBToG * interlayer * amount;
+  const float scale = dirInversionScale(
+    filmCurves, out.data(), filmCurves.type && std::strcmp(filmCurves.type, "positive") == 0);
+  for (size_t i = 0; i < 9u; ++i) {
+    out[i] *= scale;
+  }
   out[9] = densityMaximums[0];
   out[10] = densityMaximums[1];
   out[11] = densityMaximums[2];

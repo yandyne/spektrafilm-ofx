@@ -112,6 +112,25 @@ public:
   virtual const std::string &lastError() const = 0;
   virtual const RendererDiagnostics &lastDiagnostics() const = 0;
   virtual void releaseTransientResources() {}
+  // Working memory one render may use; 0 lets the renderer pick from the device.
+  virtual void setMemoryBudgetBytes(uint64_t) {}
+  // Share of GPU time renders may take (0.1-1); below 1 they run in short
+  // command buffers with pauses between, so the display and other apps get the GPU.
+  virtual void setGpuDutyCycle(float) {}
+
+  // Renders `region` of the frame `window` as part of the whole frame (grain
+  // positions, auto exposure and frame-relative effects stay those of the
+  // frame) into a destination whose x1/y1 locate it in frame coordinates.
+  virtual bool renderRegion(
+    const ImageView &,
+    const MutableImageView &,
+    const RenderWindow &,
+    const RenderWindow &,
+    const RenderParams &,
+    double
+  ) {
+    return false;
+  }
 
   virtual bool render(
     const ImageView &source,

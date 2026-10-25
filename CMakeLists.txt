@@ -156,7 +156,9 @@ set(SPEKTRAFILM_GENERATED_PROFILE_COUNTS "${CMAKE_CURRENT_BINARY_DIR}/generated/
 set(SPEKTRAFILM_GENERATED_HANATOS_LUT "${CMAKE_CURRENT_BINARY_DIR}/generated/SpektraHanatos2025Spectra.f32")
 set(SPEKTRAFILM_GENERATED_OUTPUT_GAMUT_COMPRESSION "${CMAKE_CURRENT_BINARY_DIR}/generated/SpektraOutputGamutCompression.f32")
 set(SPEKTRAFILM_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Resources/data")
-set(SPEKTRAFILM_PARITY_PROFILE_DIR "${SPEKTRAFILM_DATA_DIR}/profiles/archive")
+if(NOT DEFINED SPEKTRAFILM_PARITY_PROFILE_DIR)
+  set(SPEKTRAFILM_PARITY_PROFILE_DIR "${SPEKTRAFILM_DATA_DIR}/profiles/archive")
+endif()
 set(SPEKTRAFILM_PARITY_GENERATED_PROFILE_CURVES "${CMAKE_CURRENT_BINARY_DIR}/generated_parity/SpektraGeneratedProfileCurves.cpp")
 set(SPEKTRAFILM_PARITY_GENERATED_PROFILE_COUNTS "${CMAKE_CURRENT_BINARY_DIR}/generated_parity/SpektraGeneratedProfileCounts.h")
 set(SPEKTRAFILM_PARITY_GENERATED_HANATOS_LUT "${CMAKE_CURRENT_BINARY_DIR}/generated_parity/SpektraHanatos2025Spectra.f32")
@@ -855,6 +857,21 @@ if(APPLE)
   apply_spektra_macos_native_options(SpektraFilmNativeCore)
 
   add_dependencies(SpektraFilmNativeCore SpektraFilmMetalLibrary)
+
+  # Standalone app (sf4lr SpektraLab) core: same bridge, but the profile data the
+  # parity harness is validated against, so the app matches the Python pipeline.
+  add_library(SpektraFilmAppCore STATIC
+    src/SpektraAppBridge.mm
+    src/SpektraMetalRenderer.mm
+    "${SPEKTRAFILM_PARITY_GENERATED_PROFILE_CURVES}"
+    "${SPEKTRAFILM_PARITY_GENERATED_PROFILE_COUNTS}"
+  )
+  target_include_directories(SpektraFilmAppCore PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated_parity"
+  )
+  apply_spektra_macos_native_options(SpektraFilmAppCore)
+  add_dependencies(SpektraFilmAppCore SpektraFilmMetalLibrary)
 
   add_executable(SpektraFilmPerfHarness
     tools/SpektraMetalPerfHarness.mm

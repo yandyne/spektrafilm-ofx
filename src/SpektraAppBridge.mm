@@ -70,6 +70,21 @@ constexpr ChoiceOption kStaticOptions[] = {
   {"hdrTransfer", "Rec.2100 HLG"},
   {"hdrToneMapping", "Soft Rolloff"},
   {"hdrToneMapping", "Hard Clip"},
+  {"cameraColorFilter", "None"},
+  {"cameraColorFilter", "Yellow (8)"},
+  {"cameraColorFilter", "Orange (21)"},
+  {"cameraColorFilter", "Red (25)"},
+  {"cameraColorFilter", "Green (11)"},
+  {"sceneIlluminant", "Film balance"},
+  {"sceneIlluminant", "Daylight 5500K"},
+  {"sceneIlluminant", "Shade 7500K"},
+  {"sceneIlluminant", "Blue hour 12000K"},
+  {"sceneIlluminant", "Tungsten 3200K"},
+  {"sceneIlluminant", "Household 2700K"},
+  {"sceneIlluminant", "Candle 1900K"},
+  {"sceneIlluminant", "Cool white fluorescent"},
+  {"sceneIlluminant", "Tri-band fluorescent"},
+  {"sceneIlluminant", "Sodium street light"},
   {"autoExposureMethod", "Center weighted"},
   {"autoExposureMethod", "Median"},
   {"pushPullMode", "Standard"},
@@ -155,6 +170,9 @@ constexpr SpektraAppParamDescriptor kParams[] = {
   param("cameraUvCutNm", "UV Cut nm", "filtering", SpektraAppParamKindDouble, kParamTagNone, 0, 410.0, 0.0, 0.0, 380.0, 450.0),
   param("cameraIrFilterEnabled", "Filter IR", "filtering", SpektraAppParamKindBool, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 1.0),
   param("cameraIrCutNm", "IR Cut nm", "filtering", SpektraAppParamKindDouble, kParamTagNone, 0, 675.0, 0.0, 0.0, 600.0, 780.0),
+  param("cameraColorFilter", "Color Filter", "filtering", SpektraAppParamKindChoice, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 4.0, "cameraColorFilter"),
+  param("sceneIlluminant", "Scene Light", "filtering", SpektraAppParamKindChoice, kParamTagNone, 0, 0.0, 0.0, 0.0, 0.0, 9.0, "sceneIlluminant"),
+  param("sceneIlluminantAmount", "Scene Light Amount", "filtering", SpektraAppParamKindDouble, kParamTagNone, 0, 1.0, 0.0, 0.0, 0.0, 1.0),
 
   param("rgbToRawMethod", "RGB to Raw", "film", SpektraAppParamKindChoice, kParamTagFlow, 0, 0.0, 0.0, 0.0, 0.0, 2.0, "rgbToRawMethod"),
   param("film", "Stock", "film", SpektraAppParamKindFilmStock, kParamTagFlow, static_cast<int32_t>(spektrafilm::kSpektraDefaultFilmIndex), 0.0, 0.0, 0.0, 0.0, 1000.0, "film"),
@@ -313,6 +331,9 @@ spektrafilm::RenderParams toRendererParams(const SpektraAppRenderParams &p) {
   out.cameraUvCutNm = p.cameraUvCutNm;
   out.cameraIrFilterEnabled = p.cameraIrFilterEnabled != 0;
   out.cameraIrCutNm = p.cameraIrCutNm;
+  out.cameraColorFilter = std::clamp(p.cameraColorFilter, 0, 4);
+  out.sceneIlluminant = std::clamp(p.sceneIlluminant, 0, 9);
+  out.sceneIlluminantAmount = std::clamp(static_cast<float>(p.sceneIlluminantAmount), 0.0f, 1.0f);
   out.filmExposureEv = p.filmExposureEv;
   out.autoExposure = p.autoExposure != 0;
   out.autoExposureMethod = static_cast<spektrafilm::AutoExposureMethod>(p.autoExposureMethod);
@@ -324,6 +345,24 @@ spektrafilm::RenderParams toRendererParams(const SpektraAppRenderParams &p) {
   out.negativeLeucoCyanCoupling = p.negativeLeucoCyanCoupling;
   out.printBleachBypassAmount = p.printBleachBypassAmount;
   out.filmGamma = p.filmGamma;
+  out.filmDevLogShiftR = p.filmDevLogShiftR;
+  out.filmDevLogShiftG = p.filmDevLogShiftG;
+  out.filmDevLogShiftB = p.filmDevLogShiftB;
+  out.filmDevGammaR = p.filmDevGammaR;
+  out.filmDevGammaG = p.filmDevGammaG;
+  out.filmDevGammaB = p.filmDevGammaB;
+  out.filmDevFogR = p.filmDevFogR;
+  out.filmDevFogG = p.filmDevFogG;
+  out.filmDevFogB = p.filmDevFogB;
+  out.filmDevDmaxR = p.filmDevDmaxR;
+  out.filmDevDmaxG = p.filmDevDmaxG;
+  out.filmDevDmaxB = p.filmDevDmaxB;
+  out.printCallierQ = p.printCallierQ;
+  out.printSplitGrade = p.printSplitGrade;
+  out.printSoftGamma = p.printSoftGamma;
+  out.printHardGamma = p.printHardGamma;
+  out.printSoftLogOffset = p.printSoftLogOffset;
+  out.printHardLogOffset = p.printHardLogOffset;
   out.printGamma = p.printGamma;
   out.printShadowShape = p.printShadowShape;
   out.printHighlightShape = p.printHighlightShape;
@@ -454,6 +493,8 @@ spektrafilm::RenderParams toRendererParams(const SpektraAppRenderParams &p) {
     out.filmFormat = spektrafilm::FilmFormat::Standard35;
     out.cameraUvFilterEnabled = false;
     out.cameraIrFilterEnabled = false;
+    out.cameraColorFilter = 0;
+    out.sceneIlluminant = 0;
     out.filmExposureEv = 0.0f;
     out.autoExposure = false;
     out.filmPushPullMode = spektrafilm::PushPullMode::Standard;
@@ -461,6 +502,18 @@ spektrafilm::RenderParams toRendererParams(const SpektraAppRenderParams &p) {
     out.negativeBleachBypassAmount = 0.0f;
     out.negativeLeucoCyanCoupling = 1.0f;
     out.filmGamma = 1.0f;
+    out.filmDevLogShiftR = 0.0f;
+    out.filmDevLogShiftG = 0.0f;
+    out.filmDevLogShiftB = 0.0f;
+    out.filmDevGammaR = 1.0f;
+    out.filmDevGammaG = 1.0f;
+    out.filmDevGammaB = 1.0f;
+    out.filmDevFogR = 0.0f;
+    out.filmDevFogG = 0.0f;
+    out.filmDevFogB = 0.0f;
+    out.filmDevDmaxR = 1.0f;
+    out.filmDevDmaxG = 1.0f;
+    out.filmDevDmaxB = 1.0f;
     out.enlargerScale = 1.0f;
     out.enlargerOffsetXPercent = 0.0f;
     out.enlargerOffsetYPercent = 0.0f;
@@ -571,6 +624,75 @@ int32_t SpektraRendererRender(
   return ok ? 1 : 0;
 }
 
+int32_t SpektraRendererRenderRegion(
+  SpektraRendererRef renderer,
+  const SpektraImageBuffer *source,
+  SpektraImageBuffer *destination,
+  int32_t x,
+  int32_t y,
+  const SpektraAppRenderParams *params,
+  double time
+) {
+  if (!renderer || !renderer->renderer || !source || !destination || !params) {
+    if (renderer) {
+      renderer->lastError = "Render called with a null argument.";
+    }
+    return 0;
+  }
+  spektrafilm::ImageView sourceView{};
+  sourceView.data = source->data;
+  sourceView.width = source->width;
+  sourceView.height = source->height;
+  sourceView.rowBytes = source->rowBytes;
+  sourceView.components = source->components;
+  sourceView.bytesPerComponent = source->bytesPerComponent;
+
+  spektrafilm::MutableImageView destinationView{};
+  destinationView.data = destination->data;
+  destinationView.x1 = x;
+  destinationView.y1 = y;
+  destinationView.width = destination->width;
+  destinationView.height = destination->height;
+  destinationView.rowBytes = destination->rowBytes;
+  destinationView.components = destination->components;
+  destinationView.bytesPerComponent = destination->bytesPerComponent;
+
+  spektrafilm::RenderWindow frame{};
+  frame.x2 = source->width;
+  frame.y2 = source->height;
+  spektrafilm::RenderWindow region{};
+  region.x1 = x;
+  region.y1 = y;
+  region.x2 = x + destination->width;
+  region.y2 = y + destination->height;
+  const spektrafilm::RenderParams nativeParams = toRendererParams(*params);
+  const bool ok = renderer->renderer->renderRegion(sourceView, destinationView, frame, region, nativeParams, time);
+  if (!ok) {
+    renderer->lastError = renderer->renderer->lastError().empty()
+      ? std::string("Region rendering is not supported by this renderer.")
+      : renderer->renderer->lastError();
+  }
+  return ok ? 1 : 0;
+}
+
+void SpektraRendererSetMemoryBudget(SpektraRendererRef renderer, uint64_t bytes) {
+  if (renderer && renderer->renderer) {
+    renderer->renderer->setMemoryBudgetBytes(bytes);
+  }
+}
+
+void SpektraRendererSetGpuDutyCycle(SpektraRendererRef renderer, float duty) {
+  if (renderer && renderer->renderer) {
+    renderer->renderer->setGpuDutyCycle(duty);
+  }
+}
+
+void SpektraRendererReleaseMemory(SpektraRendererRef renderer) {
+  if (renderer && renderer->renderer) {
+    renderer->renderer->releaseTransientResources();
+  }
+}
+
 SpektraAppRenderParams SpektraAppMakeDefaultRenderParams(void) {
   SpektraAppRenderParams p{};
   p.process = static_cast<int32_t>(spektrafilm::ProcessMode::PrintSimulation);
@@ -594,10 +716,31 @@ SpektraAppRenderParams SpektraAppMakeDefaultRenderParams(void) {
   p.printTiming = static_cast<int32_t>(spektrafilm::PrintTimingMode::FilteredEnlarger);
   p.cameraUvCutNm = 410.0f;
   p.cameraIrCutNm = 675.0f;
+  p.cameraColorFilter = 0;
+  p.sceneIlluminant = 0;
+  p.sceneIlluminantAmount = 1.0f;
   p.autoExposureMethod = static_cast<int32_t>(spektrafilm::AutoExposureMethod::CenterWeighted);
   p.filmPushPullMode = static_cast<int32_t>(spektrafilm::PushPullMode::Standard);
   p.negativeLeucoCyanCoupling = 1.0f;
   p.filmGamma = 1.0f;
+  p.filmDevLogShiftR = 0.0f;
+  p.filmDevLogShiftG = 0.0f;
+  p.filmDevLogShiftB = 0.0f;
+  p.filmDevGammaR = 1.0f;
+  p.filmDevGammaG = 1.0f;
+  p.filmDevGammaB = 1.0f;
+  p.filmDevFogR = 0.0f;
+  p.filmDevFogG = 0.0f;
+  p.filmDevFogB = 0.0f;
+  p.filmDevDmaxR = 1.0f;
+  p.filmDevDmaxG = 1.0f;
+  p.filmDevDmaxB = 1.0f;
+  p.printCallierQ = 1.0f;
+  p.printSplitGrade = 0;
+  p.printSoftGamma = 1.0f;
+  p.printHardGamma = 1.0f;
+  p.printSoftLogOffset = 0.0f;
+  p.printHardLogOffset = 0.0f;
   p.printGamma = 1.0f;
   p.enlargerScale = 1.0f;
   p.printerLightCalibration = 1;
@@ -701,8 +844,14 @@ SpektraAppRenderParams SpektraAppMakeDefaultRenderParams(void) {
 int32_t SpektraAppSetIntParam(SpektraAppRenderParams *p, const char *name, int32_t value) {
   if (!p || !name) return 0;
   if (sameName(name, "process")) p->process = value;
+  else if (sameName(name, "printSplitGrade")) p->printSplitGrade = value;
   else if (sameName(name, "renderOutput")) p->renderOutput = value;
-  else if (sameName(name, "rgbToRawMethod")) p->rgbToRawMethod = value;
+  else if (sameName(name, "rgbToRawMethod")) {
+    // Choice order (Hanatos 2026, Hanatos 2025, Mallett 2019) differs from the enum.
+    static const spektrafilm::RgbToRawMethod kChoice[] = {spektrafilm::RgbToRawMethod::Hanatos2026,
+        spektrafilm::RgbToRawMethod::Hanatos2025, spektrafilm::RgbToRawMethod::Mallett2019};
+    p->rgbToRawMethod = static_cast<int32_t>(kChoice[value >= 0 && value < 3 ? value : 0]);
+  }
   else if (sameName(name, "inputColorSpace")) p->inputColorSpace = value;
   else if (sameName(name, "outputColorSpace")) p->outputColorSpace = value;
   else if (sameName(name, "outputRole")) p->outputRole = value;
@@ -713,6 +862,8 @@ int32_t SpektraAppSetIntParam(SpektraAppRenderParams *p, const char *name, int32
   else if (sameName(name, "paper")) p->paper = value;
   else if (sameName(name, "printTiming")) p->printTiming = value;
   else if (sameName(name, "autoExposureMethod")) p->autoExposureMethod = value;
+  else if (sameName(name, "cameraColorFilter")) p->cameraColorFilter = value;
+  else if (sameName(name, "sceneIlluminant")) p->sceneIlluminant = value;
   else if (sameName(name, "filmPushPullMode")) p->filmPushPullMode = value;
   else if (sameName(name, "grainModel")) p->grainModel = value;
   else if (sameName(name, "filmFormat")) p->filmFormat = value;
@@ -762,6 +913,7 @@ int32_t SpektraAppSetDoubleParam(SpektraAppRenderParams *p, const char *name, do
   else if (sameName(name, "hdrExposureEv")) p->hdrExposureEv = v;
   else if (sameName(name, "cameraUvCutNm")) p->cameraUvCutNm = v;
   else if (sameName(name, "cameraIrCutNm")) p->cameraIrCutNm = v;
+  else if (sameName(name, "sceneIlluminantAmount")) p->sceneIlluminantAmount = v;
   else if (sameName(name, "filmExposureEv")) p->filmExposureEv = v;
   else if (sameName(name, "printExposureEv")) p->printExposureEv = v;
   else if (sameName(name, "filmPushPullStops")) p->filmPushPullStops = v;
@@ -773,6 +925,11 @@ int32_t SpektraAppSetDoubleParam(SpektraAppRenderParams *p, const char *name, do
   else if (sameName(name, "printGamma")) p->printGamma = v;
   else if (sameName(name, "printShadowShape")) p->printShadowShape = v;
   else if (sameName(name, "printHighlightShape")) p->printHighlightShape = v;
+  else if (sameName(name, "printCallierQ")) p->printCallierQ = v;
+  else if (sameName(name, "printSoftGamma")) p->printSoftGamma = v;
+  else if (sameName(name, "printHardGamma")) p->printHardGamma = v;
+  else if (sameName(name, "printSoftLogOffset")) p->printSoftLogOffset = v;
+  else if (sameName(name, "printHardLogOffset")) p->printHardLogOffset = v;
   else if (sameName(name, "filterC")) p->filterC = v;
   else if (sameName(name, "filterMShift")) p->filterMShift = v;
   else if (sameName(name, "filterYShift")) p->filterYShift = v;
@@ -858,6 +1015,22 @@ int32_t SpektraAppSetDouble3Param(SpektraAppRenderParams *p, const char *name, d
   } else if (sameName(name, "dirGammaBToRg")) {
     p->dirCouplersGammaBToR = static_cast<float>(x);
     p->dirCouplersGammaBToG = static_cast<float>(y);
+  } else if (sameName(name, "filmDevLogShift")) {
+    p->filmDevLogShiftR = static_cast<float>(x);
+    p->filmDevLogShiftG = static_cast<float>(y);
+    p->filmDevLogShiftB = static_cast<float>(z);
+  } else if (sameName(name, "filmDevGamma")) {
+    p->filmDevGammaR = static_cast<float>(x);
+    p->filmDevGammaG = static_cast<float>(y);
+    p->filmDevGammaB = static_cast<float>(z);
+  } else if (sameName(name, "filmDevFog")) {
+    p->filmDevFogR = static_cast<float>(x);
+    p->filmDevFogG = static_cast<float>(y);
+    p->filmDevFogB = static_cast<float>(z);
+  } else if (sameName(name, "filmDevDmax")) {
+    p->filmDevDmaxR = static_cast<float>(x);
+    p->filmDevDmaxG = static_cast<float>(y);
+    p->filmDevDmaxB = static_cast<float>(z);
   } else if (sameName(name, "grainParticleScale")) {
     p->grainParticleScaleR = static_cast<float>(x);
     p->grainParticleScaleG = static_cast<float>(y);
@@ -984,4 +1157,18 @@ uint32_t SpektraAppPaperCount(void) {
 const char *SpektraAppPaperName(uint32_t index) {
   const spektrafilm::ProfileCurveSet *curves = spektrafilm::paperProfileCurves(static_cast<int32_t>(index));
   return curves && curves->stock ? curves->stock : "";
+}
+
+uint32_t SpektraAppStockCurves(int32_t paper, uint32_t index, float *logExposure, float *density, uint32_t capacity) {
+  const spektrafilm::ProfileCurveSet *curves = paper ? spektrafilm::paperProfileCurves(static_cast<int32_t>(index))
+                                                     : spektrafilm::filmProfileCurves(static_cast<int32_t>(index));
+  if (!curves || !curves->logExposure || !curves->densityCurves) return 0u;
+  const uint32_t n = std::min(curves->exposureCount, capacity);
+  for (uint32_t i = 0u; i < n; ++i) {
+    if (logExposure) logExposure[i] = curves->logExposure[i];
+    if (density) {
+      for (uint32_t c = 0u; c < 3u; ++c) density[i * 3u + c] = curves->densityCurves[i * 3u + c];
+    }
+  }
+  return curves->exposureCount;
 }

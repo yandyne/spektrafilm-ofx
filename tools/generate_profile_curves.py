@@ -409,9 +409,12 @@ def _legacy_info_value(profile: dict, stock: str, key: str):
 
 def _archived_bandpass_hanatos2025(stock: str) -> list[list[float | None]] | None:
     archived = _load_archive_profile(stock)
-    if archived is None:
-        return None
-    bandpass = archived.get("data", {}).get("bandpass_hanatos2025", [])
+    bandpass = (archived or {}).get("data", {}).get("bandpass_hanatos2025", [])
+    if not bandpass:
+        # release profiles carry no bandpass; take it from the archive profiles
+        path = DATA_DIR / "profiles" / "archive" / f"{stock}.json"
+        if path.is_file():
+            bandpass = json.loads(path.read_text(encoding="utf-8")).get("data", {}).get("bandpass_hanatos2025", [])
     if not bandpass:
         return None
     return [[None if value is None else float(value) for value in row] for row in bandpass]

@@ -86,6 +86,9 @@ typedef struct SpektraAppRenderParams {
   float cameraUvCutNm;
   int32_t cameraIrFilterEnabled;
   float cameraIrCutNm;
+  int32_t cameraColorFilter;
+  int32_t sceneIlluminant;
+  float sceneIlluminantAmount;
 
   float filmExposureEv;
   int32_t autoExposure;
@@ -230,6 +233,25 @@ typedef struct SpektraAppRenderParams {
   float scannerUnsharpRadiusUm;
   float scannerUnsharpAmount;
   int32_t scanNegativeInvert;
+  /* Development modifiers (temperature/time/aging), per channel. */
+  float filmDevLogShiftR;
+  float filmDevLogShiftG;
+  float filmDevLogShiftB;
+  float filmDevGammaR;
+  float filmDevGammaG;
+  float filmDevGammaB;
+  float filmDevFogR;
+  float filmDevFogG;
+  float filmDevFogB;
+  float filmDevDmaxR;
+  float filmDevDmaxG;
+  float filmDevDmaxB;
+  float printCallierQ;
+  int printSplitGrade;
+  float printSoftGamma;
+  float printHardGamma;
+  float printSoftLogOffset;
+  float printHardLogOffset;
 } SpektraAppRenderParams;
 
 typedef struct SpektraAppGroupDescriptor {
@@ -262,6 +284,25 @@ int32_t SpektraRendererRender(
   const SpektraAppRenderParams *params,
   double time
 );
+/* Renders the destination-sized region at (x, y) of the source frame, as part
+   of the whole frame (same grain, auto exposure and frame-relative effects). */
+int32_t SpektraRendererRenderRegion(
+  SpektraRendererRef renderer,
+  const SpektraImageBuffer *source,
+  SpektraImageBuffer *destination,
+  int32_t x,
+  int32_t y,
+  const SpektraAppRenderParams *params,
+  double time
+);
+/* Working memory one render may use (renders tile to stay within it); 0 picks
+   a share of the device's recommended working set. */
+void SpektraRendererSetMemoryBudget(SpektraRendererRef renderer, uint64_t bytes);
+/* Share of GPU time renders may take, 0.1-1 (1 = unthrottled). Below 1 a render
+   is split into short command buffers with pauses, keeping the system responsive. */
+void SpektraRendererSetGpuDutyCycle(SpektraRendererRef renderer, float duty);
+/* Frees cached scratch memory; the next render reallocates it. */
+void SpektraRendererReleaseMemory(SpektraRendererRef renderer);
 
 SpektraAppRenderParams SpektraAppMakeDefaultRenderParams(void);
 int32_t SpektraAppSetIntParam(SpektraAppRenderParams *params, const char *name, int32_t value);
@@ -286,6 +327,9 @@ uint32_t SpektraAppFilmCount(void);
 const char *SpektraAppFilmName(uint32_t index);
 uint32_t SpektraAppPaperCount(void);
 const char *SpektraAppPaperName(uint32_t index);
+/* Characteristic curves of a stock: fills up to `capacity` log-exposure points and their
+   R, G, B densities (interleaved), returns the number of points the profile has. */
+uint32_t SpektraAppStockCurves(int32_t paper, uint32_t index, float *logExposure, float *density, uint32_t capacity);
 
 #ifdef __cplusplus
 }
