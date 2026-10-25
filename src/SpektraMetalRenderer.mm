@@ -4589,7 +4589,9 @@ bool MetalRenderer::renderSingle(
       dirBlurPath &&
       params.dirCouplersDiffusionTailUm > 0.0f &&
       params.dirCouplersDiffusionTailWeight > 0.0f;
-    const bool dirTailMpsPath = dirTailPath && impl_->dirTailBackend == DirTailBackend::Mps;
+    // Metal textures stop at 16384 px; bigger frames take the buffer paths.
+    const bool fitsTexture = width <= 16384 && height <= 16384;
+    const bool dirTailMpsPath = dirTailPath && fitsTexture && impl_->dirTailBackend == DirTailBackend::Mps;
     const bool productionGrainPath =
       params.grainEnabled &&
       params.grainModel == GrainModel::Production &&
@@ -4783,8 +4785,8 @@ bool MetalRenderer::renderSingle(
       finalPostProcessPath && !rcmOutput && params.scannerEnabled &&
       params.scannerUnsharpRadiusUm > 0.0f && params.scannerUnsharpAmount > 0.0f;
     const bool scannerMpsPath = (impl_->scannerMps || impl_->blurBackend == "mps" ||
-      (impl_->blurBackend == "auto" && impl_->useScannerTextures)) && (scannerNeedsBlur || scannerNeedsUnsharp);
-    const bool scannerTexturePath = (impl_->useScannerTextures || scannerMpsPath) && (scannerNeedsBlur || scannerNeedsUnsharp);
+      (impl_->blurBackend == "auto" && impl_->useScannerTextures)) && fitsTexture && (scannerNeedsBlur || scannerNeedsUnsharp);
+    const bool scannerTexturePath = (impl_->useScannerTextures || scannerMpsPath) && fitsTexture && (scannerNeedsBlur || scannerNeedsUnsharp);
     const MTLPixelFormat blurTextureFormat = impl_->intermediatePrecision == "half-blur"
       ? MTLPixelFormatRGBA16Float
       : MTLPixelFormatRGBA32Float;
@@ -4880,7 +4882,7 @@ bool MetalRenderer::renderSingle(
     const bool optimizedGrainSynthesisPath = grainSynthesisPath && !impl_->useLegacyGrainSynthesis;
     const bool halfGrainSynthesisTargetPath = optimizedGrainSynthesisPath &&
       impl_->grainSynthesisTargetStorageMode == GrainSynthesisTargetStorageMode::HalfBuffer;
-    const bool textureGrainSynthesisTargetPath = optimizedGrainSynthesisPath &&
+    const bool textureGrainSynthesisTargetPath = optimizedGrainSynthesisPath && fitsTexture &&
       impl_->grainSynthesisTargetStorageMode == GrainSynthesisTargetStorageMode::R16TextureArray;
     const bool floatGrainSynthesisTargetPath = optimizedGrainSynthesisPath &&
       !halfGrainSynthesisTargetPath &&
