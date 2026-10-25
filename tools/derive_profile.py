@@ -27,7 +27,7 @@ def derive(stock: str, base: str, name: str, note: str, info: dict[str, str]) ->
     for d in PROFILE_DIRS:
         p = json.loads((d / f"{base}.json").read_text())
         p["info"].update(stock=stock, name=name, **info)
-        p.setdefault("metadata", {})["derivation"] = f"Derived by SpektraLab from {base}: {note}"
+        p.setdefault("metadata", {})["derivation"] = f"Derived by PhotoEmul from {base}: {note}"
         (d / f"{stock}.json").write_text(json.dumps(p, indent=4))
     for f in FILTER_FILES:
         filters = json.loads(f.read_text())

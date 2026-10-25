@@ -196,6 +196,7 @@ struct SpektraKernelParams {
   float printHardGamma;
   float printSoftLogOffset;
   float printHardLogOffset;
+  float grainSampledBlurKeep;
 };
 
 static bool spektra_color_adaptation_enabled(constant SpektraKernelParams &params, uint flag) {
@@ -3051,21 +3052,8 @@ static float spektra_grain_level_damping(constant SpektraKernelParams &params) {
   const float s = 1.4142135624 * blurUm;
   const float r = p / s;
   const float continuous = max(2.0 / p * (p * (spektra_normal_cdf(r) - 0.5) - s * (spektra_normal_pdf(0.0) - spektra_normal_pdf(r))), 1.0e-6);
-  // What the sampled kernel in grain_density_blur_x/y keeps per axis.
-  float sampled = 1.0;
-  const float sigma = blurUm / p;
-  if (spektra_grain_final_blur_applies(params)) {
-    const int radius = min(int(ceil(3.0 * sigma)), 64);
-    float sum = 0.0;
-    float sum2 = 0.0;
-    for (int offset = -radius; offset <= radius; ++offset) {
-      const float w = exp(-0.5 * float(offset * offset) / max(sigma * sigma, 1.0e-8));
-      sum += w;
-      sum2 += w * w;
-    }
-    sampled = sum2 / max(sum * sum, 1.0e-12);
-  }
-  return min(continuous / sampled, 1.0);
+  // What the sampled kernel in grain_density_blur_x/y keeps per axis (summed on the host).
+  return min(continuous / max(params.grainSampledBlurKeep, 1.0e-12), 1.0);
 }
 
 static float spektra_production_layer_particle_density(

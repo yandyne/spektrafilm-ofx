@@ -325,6 +325,7 @@ struct KernelParams {
   float printHardGamma;
   float printSoftLogOffset;
   float printHardLogOffset;
+  float grainSampledBlurKeep;
 };
 
 constexpr uint32_t kGrainSynthesisComponentCount = 9u;
@@ -1128,6 +1129,21 @@ KernelParams toKernelParams(const RenderParams &params, double time, int32_t wid
   out.printHardGamma = params.printHardGamma;
   out.printSoftLogOffset = params.printSoftLogOffset;
   out.printHardLogOffset = params.printHardLogOffset;
+  // What the sampled kernel in grain_density_blur_x/y keeps per axis: uniform over the frame, so
+  // summed here once instead of per pixel in spektra_grain_level_damping.
+  out.grainSampledBlurKeep = 1.0f;
+  const float grainSigma = effectiveGrainFinalBlurUm(params) / std::max(out.filmPixelSizeUm, 1.0e-6f);
+  if (grainSigma > 0.0f && (out.grainSublayersEnabled != 0u || grainSigma > 0.4f)) {
+    const int radius = std::min(static_cast<int>(std::ceil(3.0f * grainSigma)), 64);
+    float sum = 0.0f;
+    float sum2 = 0.0f;
+    for (int offset = -radius; offset <= radius; ++offset) {
+      const float w = std::exp(-0.5f * static_cast<float>(offset * offset) / std::max(grainSigma * grainSigma, 1.0e-8f));
+      sum += w;
+      sum2 += w * w;
+    }
+    out.grainSampledBlurKeep = sum2 / std::max(sum * sum, 1.0e-12f);
+  }
   return out;
 }
 
@@ -3250,6 +3266,13 @@ struct MetalRenderer::Impl {
     autoExposureLuminance.shrink_to_fit();
     scratchCursor = 0;
     textureScratchCursor = 0;
+    // Keep only the profile in use (the front entry); the rest rebuild on demand.
+    if (staticResourceCache.size() > 1) {
+      staticResourceCache.erase(staticResourceCache.begin() + 1, staticResourceCache.end());
+      staticResourceCache.shrink_to_fit();
+    }
+    tileDestination.reset();
+    tileDestinationBytes = 0;
   }
 
   std::string pipelineName(id<MTLComputePipelineState> pipeline) const {
@@ -4101,6 +4124,8 @@ void MetalRenderer::releaseTransientResources() {
   if (!impl_) {
     return;
   }
+  // Same order as renderTiled: the strip buffer belongs to the tiled lock.
+  std::lock_guard<std::mutex> tiledLock(impl_->tiledRenderMutex);
   std::lock_guard<std::mutex> renderLock(impl_->renderMutex);
   @autoreleasepool {
     impl_->releaseTransientResources();
