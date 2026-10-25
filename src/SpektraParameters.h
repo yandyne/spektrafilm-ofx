@@ -183,6 +183,12 @@ struct RenderParams {
   float printHardGamma = 1.0f;
   float printSoftLogOffset = 0.0f;
   float printHardLogOffset = 0.0f;
+  float unevenMottle = 0.0f;
+  float unevenEdge = 0.0f;
+  float unevenSurge = 0.0f;
+  float unevenAirBells = 0.0f;
+  float unevenLowLevel = 0.0f;
+  int unevenSeed = 0;
   float printGamma = 1.0f;
   float printShadowShape = 0.0f;
   float printHighlightShape = 0.0f;

@@ -197,6 +197,12 @@ struct SpektraKernelParams {
   float printSoftLogOffset;
   float printHardLogOffset;
   float grainSampledBlurKeep;
+  float unevenMottle;
+  float unevenEdge;
+  float unevenSurge;
+  float unevenAirBells;
+  float unevenLowLevel;
+  uint unevenSeed;
 };
 
 static bool spektra_color_adaptation_enabled(constant SpektraKernelParams &params, uint flag) {
@@ -1667,12 +1673,118 @@ static float3 spektra_film_log_raw_linear_srgb(
   return log10(max(raw, float3(0.0)) + float3(1.0e-10));
 }
 
+
+// Uneven development: process defects offered as looks. Returns the relative change in developed
+// density at this pixel (0 = even, -1 = undeveloped). Built from film millimetres in absolute
+// frame coordinates so tiles, proxies and full renders share one pattern.
+static float spektra_uneven_lattice(int2 cell, uint seed) {
+  return spektra_rand01(spektra_hash(uint(cell.x) * 0x1f123bb5u + spektra_hash(uint(cell.y) ^ seed)));
+}
+
+static float spektra_uneven_value_noise(float2 p, uint seed) {
+  const float2 i = floor(p);
+  const float2 f = p - i;
+  const float2 u = f * f * (3.0 - 2.0 * f);
+  const int2 c = int2(i);
+  const float a = spektra_uneven_lattice(c, seed);
+  const float b = spektra_uneven_lattice(c + int2(1, 0), seed);
+  const float d = spektra_uneven_lattice(c + int2(0, 1), seed);
+  const float e = spektra_uneven_lattice(c + int2(1, 1), seed);
+  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+
+static float spektra_uneven_development(
+  uint2 gid,
+  constant SpektraKernelParams &params,
+  constant uint2 &dims
+) {
+  const float mottle = params.unevenMottle;
+  const float edge = params.unevenEdge;
+  const float surge = params.unevenSurge;
+  const float bells = params.unevenAirBells;
+  const float low = params.unevenLowLevel;
+  if (mottle + edge + surge + bells + low <= 0.0) {
+    return 0.0;
+  }
+  const float scale = max(params.enlargerScale, 1.0);
+  const float2 frameMm = spektra_frame_dims(params, dims) * max(params.filmPixelSizeUm * scale, 1.0e-6) * 0.001;
+  const float2 mm = spektra_output_pixel_film_um(gid, params, dims) * 0.001;
+  // The strip runs along the frame's long side; its edges and perforations lie across the short side.
+  const bool landscape = frameMm.x >= frameMm.y;
+  const float along = landscape ? mm.x : mm.y;
+  const float across = landscape ? mm.y : mm.x;
+  const float width = landscape ? frameMm.y : frameMm.x;
+  const float edgeDist = max(min(across, width - across), 0.0);
+  const uint seed = spektra_hash(params.unevenSeed * 0x9e3779b9u + 0x51ed27u);
+  float delta = 0.0;
+
+  // Mottling: slow, cloudy patches from tired developer or too little agitation.
+  if (mottle > 0.0) {
+    const float n = 0.6 * spektra_uneven_value_noise(mm / 7.0, seed ^ 0x11u) +
+      0.3 * spektra_uneven_value_noise(mm / 2.8, seed ^ 0x22u) +
+      0.1 * spektra_uneven_value_noise(mm / 1.1, seed ^ 0x33u);
+    delta += mottle * 0.3 * (n - 0.5) * 2.0;
+  }
+  // Edge overdevelopment: fresh developer reaches the strip edges first.
+  if (edge > 0.0) {
+    delta += edge * 0.2 * exp(-edgeDist / 1.8);
+  }
+  // Surge marks: dense streaks running in from the perforations (35 mm pitch 4.75 mm).
+  if (surge > 0.0) {
+    const float pitch = 4.75;
+    const float phase = spektra_rand01(seed ^ 0x44u) * pitch;
+    const float k = floor((along - phase) / pitch + 0.5);
+    const float centre = k * pitch + phase;
+    // Both rows of perforations add their streaks, so the pattern stays continuous mid-frame.
+    for (uint side = 0u; side < 2u; ++side) {
+      const float sideDist = max(side == 0u ? across : width - across, 0.0);
+      const uint perfSeed = spektra_hash(seed ^ (uint(int(k)) * 0x2c1b3c6du) ^ (side * 0x297a2d39u));
+      if (spektra_rand01(perfSeed) > 0.3) {
+        const float lengthMm = 2.0 + 6.0 * spektra_rand01(perfSeed ^ 0x55u);
+        const float strength = 0.5 + 0.5 * spektra_rand01(perfSeed ^ 0x66u);
+        const float lateral = (along - centre) / (0.7 + 0.08 * sideDist);
+        delta += surge * 0.3 * strength * exp(-lateral * lateral) * exp(-sideDist / lengthMm);
+      }
+    }
+  }
+  // Air bells: bubbles stuck to the emulsion keep developer off small round spots.
+  if (bells > 0.0) {
+    const float cellMm = 2.5;
+    const float2 cellPos = mm / cellMm;
+    const int2 baseCell = int2(floor(cellPos));
+    const float probability = min(0.05 + 0.25 * bells, 0.4);
+    float spot = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        const int2 cell = baseCell + int2(dx, dy);
+        const uint cellSeed = spektra_hash(uint(cell.x) * 0x1f123bb5u + spektra_hash(uint(cell.y) ^ seed ^ 0x77u));
+        if (spektra_rand01(cellSeed) >= probability) {
+          continue;
+        }
+        const float2 centre = (float2(cell) + float2(spektra_rand01(cellSeed ^ 0x1u), spektra_rand01(cellSeed ^ 0x2u))) * cellMm;
+        const float radius = 0.15 + 0.5 * spektra_rand01(cellSeed ^ 0x3u);
+        spot = max(spot, 1.0 - smoothstep(radius * 0.7, radius, length(mm - centre)));
+      }
+    }
+    delta -= (0.5 + 0.4 * min(bells, 1.0)) * spot;
+  }
+  // Too little developer: one long side stays above the liquid; a denser line marks the meniscus.
+  if (low > 0.0) {
+    const float boundary = min(low, 1.0) * 0.4 * width +
+      0.5 * (spektra_uneven_value_noise(float2(along / 3.0, 0.5), seed ^ 0x88u) - 0.5);
+    const float inside = smoothstep(boundary + 0.25, boundary - 0.25, across);
+    delta += -0.85 * inside + 0.12 * exp(-abs(across - boundary) / 0.4) * (1.0 - inside);
+  }
+  return clamp(delta, -0.95, 1.0);
+}
+
 static float3 spektra_develop_film_density(
   float3 logRaw,
   constant SpektraKernelParams &params,
   constant SpektraCurveInfo &curveInfo,
   device const float *logExposure,
-  device const float *densityCurves
+  device const float *densityCurves,
+  float unevenDelta = 0.0
 ) {
   const uint smoothInterpolation =
     spektra_color_adaptation_enabled(params, kSpektraColorAdaptationCurveSmoothing) ? 1u : 0u;
@@ -1680,7 +1792,8 @@ static float3 spektra_develop_film_density(
   // contrast, density scale and fog. Neutral values leave the curves untouched.
   const float3 devShift = float3(params.filmDevLogShiftR, params.filmDevLogShiftG, params.filmDevLogShiftB);
   const float3 devGamma = params.filmGamma * float3(params.filmDevGammaR, params.filmDevGammaG, params.filmDevGammaB);
-  const float3 devDmax = float3(params.filmDevDmaxR, params.filmDevDmaxG, params.filmDevDmaxB);
+  // Uneven development scales the developed density above fog, like local development activity.
+  const float3 devDmax = float3(params.filmDevDmaxR, params.filmDevDmaxG, params.filmDevDmaxB) * (1.0 + unevenDelta);
   const float3 devFog = float3(params.filmDevFogR, params.filmDevFogG, params.filmDevFogB);
   const float3 shiftedRaw = logRaw - devShift;
   if (params.filmPushPullMode == 1) {
@@ -4369,7 +4482,7 @@ kernel void spektrafilm_halation_resolve_density(
     max(params.halationAmount, 0.0);
   const float3 resolved = (raw.rgb + amount * halationIn[index].rgb) / (1.0 + amount);
   const float3 logRaw = log10(max(resolved, float3(0.0)) + float3(1.0e-10));
-  densityOut[index] = float4(spektra_develop_film_density(logRaw, params, curveInfo, logExposure, densityCurves), raw.a);
+  densityOut[index] = float4(spektra_develop_film_density(logRaw, params, curveInfo, logExposure, densityCurves, spektra_uneven_development(gid, params, dims)), raw.a);
 }
 
 kernel void spektrafilm_develop_from_log_raw(
@@ -4387,7 +4500,7 @@ kernel void spektrafilm_develop_from_log_raw(
   }
   const uint index = gid.y * dims.x + gid.x;
   const float4 logRaw = logRawIn[index];
-  densityOut[index] = float4(spektra_develop_film_density(logRaw.rgb, params, curveInfo, logExposure, densityCurves), logRaw.a);
+  densityOut[index] = float4(spektra_develop_film_density(logRaw.rgb, params, curveInfo, logExposure, densityCurves, spektra_uneven_development(gid, params, dims)), logRaw.a);
 }
 
 kernel void spektrafilm_develop_from_raw(
@@ -4406,7 +4519,7 @@ kernel void spektrafilm_develop_from_raw(
   const uint index = gid.y * dims.x + gid.x;
   const float4 raw = rawIn[index];
   const float3 logRaw = log10(max(raw.rgb, float3(0.0)) + float3(1.0e-10));
-  densityOut[index] = float4(spektra_develop_film_density(logRaw, params, curveInfo, logExposure, densityCurves), raw.a);
+  densityOut[index] = float4(spektra_develop_film_density(logRaw, params, curveInfo, logExposure, densityCurves, spektra_uneven_development(gid, params, dims)), raw.a);
 }
 
 kernel void spektrafilm_dir_correction_from_density(
@@ -4415,6 +4528,7 @@ kernel void spektrafilm_dir_correction_from_density(
   constant uint2 &dims [[buffer(2)]],
   constant SpektraSpectralInfo &spectralInfo [[buffer(3)]],
   constant SpektraDirInfo &dirInfo [[buffer(4)]],
+  constant SpektraKernelParams &params [[buffer(5)]],
   uint2 gid [[thread_position_in_grid]]
 ) {
   if (gid.x >= dims.x || gid.y >= dims.y) {
@@ -4422,7 +4536,10 @@ kernel void spektrafilm_dir_correction_from_density(
   }
   const uint index = gid.y * dims.x + gid.x;
   const float4 density = densityIn[index];
-  correctionOut[index] = float4(spektra_dir_correction_from_density(density.rgb, spectralInfo, dirInfo), density.a);
+  // Take uneven development back out of the inhibitor estimate (see spektrafilm_dir_baseline).
+  const float3 devFog = float3(params.filmDevFogR, params.filmDevFogG, params.filmDevFogB);
+  const float3 plain = (density.rgb - devFog) / (1.0 + spektra_uneven_development(gid, params, dims)) + devFog;
+  correctionOut[index] = float4(spektra_dir_correction_from_density(plain, spectralInfo, dirInfo), density.a);
 }
 
 kernel void spektrafilm_copy_buffer(
@@ -5351,6 +5468,8 @@ kernel void spektrafilm_dir_baseline(
     decodeLuts,
     transferKinds
   );
+  // Uneven development is left out of the inhibitor estimate: scaling it here makes the DIR
+  // correction overshoot and inverts the defect (denser streaks print dark and brown).
   const float3 density = spektra_develop_film_density(logRaw, params, curveInfo, logExposure, densityCurves);
   logRawOut[index] = float4(logRaw, sourcePixel.a);
   densityOut[index] = float4(density, sourcePixel.a);
@@ -5517,7 +5636,7 @@ kernel void spektrafilm_dir_redevelop(
   const float4 logRaw = logRawIn[index];
   const float3 correctedLogRaw = logRaw.rgb - correctionIn[index].rgb;
   densityOut[index] = float4(
-    spektra_develop_film_density(correctedLogRaw, params, curveInfo, logExposure, dirCorrectedDensityCurves),
+    spektra_develop_film_density(correctedLogRaw, params, curveInfo, logExposure, dirCorrectedDensityCurves, spektra_uneven_development(gid, params, dims)),
     logRaw.a
   );
 }
@@ -5605,7 +5724,8 @@ kernel void spektrafilm_production_grain_layers(
     params,
     curveInfo,
     logExposure,
-    densityCurves
+    densityCurves,
+    spektra_uneven_development(gid.xy, params, dims)
   );
   layerOut[index * 9u + component] = spektra_production_layer_particle_density(
     filmDensityCmy,
@@ -7855,7 +7975,8 @@ kernel void spektrafilm_grain_preview(
     params,
     curveInfo,
     logExposure,
-    densityCurves
+    densityCurves,
+    spektra_uneven_development(gid, params, dims)
   );
 
   if (params.grainEnabled != 0 && (finalPrintSimulation || finalScanNegative)) {

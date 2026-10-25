@@ -326,6 +326,12 @@ struct KernelParams {
   float printSoftLogOffset;
   float printHardLogOffset;
   float grainSampledBlurKeep;
+  float unevenMottle;
+  float unevenEdge;
+  float unevenSurge;
+  float unevenAirBells;
+  float unevenLowLevel;
+  uint32_t unevenSeed;
 };
 
 constexpr uint32_t kGrainSynthesisComponentCount = 9u;
@@ -1132,6 +1138,12 @@ KernelParams toKernelParams(const RenderParams &params, double time, int32_t wid
   // What the sampled kernel in grain_density_blur_x/y keeps per axis: uniform over the frame, so
   // summed here once instead of per pixel in spektra_grain_level_damping.
   out.grainSampledBlurKeep = 1.0f;
+  out.unevenMottle = std::max(params.unevenMottle, 0.0f);
+  out.unevenEdge = std::max(params.unevenEdge, 0.0f);
+  out.unevenSurge = std::max(params.unevenSurge, 0.0f);
+  out.unevenAirBells = std::max(params.unevenAirBells, 0.0f);
+  out.unevenLowLevel = std::max(params.unevenLowLevel, 0.0f);
+  out.unevenSeed = static_cast<uint32_t>(params.unevenSeed);
   const float grainSigma = effectiveGrainFinalBlurUm(params) / std::max(out.filmPixelSizeUm, 1.0e-6f);
   if (grainSigma > 0.0f && (out.grainSublayersEnabled != 0u || grainSigma > 0.4f)) {
     const int radius = std::min(static_cast<int>(std::ceil(3.0f * grainSigma)), 64);
@@ -6782,6 +6794,7 @@ bool MetalRenderer::renderSingle(
           [encoder setBytes:dims length:sizeof(dims) atIndex:2];
           [encoder setBuffer:spectralInfoBuffer offset:0 atIndex:3];
           [encoder setBuffer:dirInfoBuffer offset:0 atIndex:4];
+          [encoder setBuffer:paramBuffer offset:0 atIndex:5];
           dispatch2D(impl_->dirCorrectionFromDensityPipeline);
 
           id<MTLBuffer> blurredDirCorrectionBuffer = encodeDirCorrectionBlur(dirCorrectionBufferA);

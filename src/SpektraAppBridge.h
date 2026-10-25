@@ -252,6 +252,13 @@ typedef struct SpektraAppRenderParams {
   float printHardGamma;
   float printSoftLogOffset;
   float printHardLogOffset;
+  /* Uneven development (process defects), 0 = off. */
+  float unevenMottle;
+  float unevenEdge;
+  float unevenSurge;
+  float unevenAirBells;
+  float unevenLowLevel;
+  int unevenSeed;
 } SpektraAppRenderParams;
 
 typedef struct SpektraAppGroupDescriptor {
