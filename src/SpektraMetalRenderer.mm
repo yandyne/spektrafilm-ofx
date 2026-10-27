@@ -3000,6 +3000,7 @@ struct MetalRenderer::Impl {
   uint64_t memoryBudgetBytes = 0;
   // Share of GPU time a render may take; set from any thread.
   std::atomic<float> gpuDuty{1.0f};
+  std::atomic<bool> cancelRequested{false};
 
   // Pixels one renderSingle() may cover. Scratch is ~420 bytes per pixel, and
   // the app runs several renderers sharing the GPU working set and system
@@ -4223,6 +4224,9 @@ bool MetalRenderer::render(
   const RenderParams &params,
   double time
 ) {
+  if (impl_) {
+    impl_->cancelRequested.store(false);
+  }
   const int32_t width = window.x2 - window.x1;
   const int32_t height = window.y2 - window.y1;
   const char *mode = tilingEnv("SPEKTRAFILM_TILING");
@@ -4277,6 +4281,12 @@ void MetalRenderer::setGpuDutyCycle(float duty) {
   }
 }
 
+void MetalRenderer::cancel() {
+  if (impl_) {
+    impl_->cancelRequested.store(true);
+  }
+}
+
 void MetalRenderer::setMemoryBudgetBytes(uint64_t bytes) {
   if (impl_) {
     std::lock_guard<std::mutex> renderLock(impl_->renderMutex);
@@ -4292,6 +4302,9 @@ bool MetalRenderer::renderRegion(
   const RenderParams &params,
   double time
 ) {
+  if (impl_) {
+    impl_->cancelRequested.store(false);
+  }
   if (!isAvailable()) {
     return false;
   }
@@ -5250,12 +5263,14 @@ bool MetalRenderer::renderSingle(
     const float gpuDuty = externalMetal ? 1.0f : impl_->gpuDuty.load();
     constexpr uint64_t kThrottleChunkThreads = 4000000u;
     uint64_t throttleThreads = 0;
+    bool renderCancelled = false;
     auto throttle = [&](size_t passIndex) {
       if (passIndex < impl_->diagnostics.passes.size()) {
         const auto &pass = impl_->diagnostics.passes[passIndex];
         throttleThreads += static_cast<uint64_t>(pass.width) * pass.height * std::max(pass.depth, 1u);
       }
-      if (throttleThreads < kThrottleChunkThreads) {
+      // Unthrottled renders split only for cancel checks: fewer, larger chunks (about 4 per preview).
+      if (throttleThreads < (gpuDuty < 0.999f ? kThrottleChunkThreads : 2u * kThrottleChunkThreads)) {
         return;
       }
       throttleThreads = 0;
@@ -5266,6 +5281,13 @@ bool MetalRenderer::renderSingle(
       if ([commandBuffer status] == MTLCommandBufferStatusError) {
         NSError *error = [commandBuffer error];
         impl_->lastError = error ? [[error localizedDescription] UTF8String] : "Metal command buffer failed.";
+        encodeFailed = true;
+        return;
+      }
+      if (impl_->cancelRequested.load()) {
+        // A fresh encoder keeps later direct encoder calls valid; dispatches skip once failed.
+        renderCancelled = beginCommandEncoder();
+        impl_->lastError = "Render cancelled.";
         encodeFailed = true;
         return;
       }
@@ -5284,7 +5306,8 @@ bool MetalRenderer::renderSingle(
         return;
       }
       if (!useSplitPassTiming) {
-        if (gpuDuty < 0.999f) {
+        // App renders always split, so a cancel stops them between chunks.
+        if (gpuDuty < 0.999f || !externalMetal) {
           throttle(passIndex);
         }
         return;
@@ -7040,6 +7063,9 @@ bool MetalRenderer::renderSingle(
       );
     }
     if (encodeFailed) {
+      if (renderCancelled && encoder) {
+        [encoder endEncoding];
+      }
       return false;
     }
     if (useSplitPassTiming) {

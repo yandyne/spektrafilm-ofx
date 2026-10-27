@@ -701,6 +701,12 @@ void SpektraRendererSetGpuDutyCycle(SpektraRendererRef renderer, float duty) {
   }
 }
 
+void SpektraRendererCancel(SpektraRendererRef renderer) {
+  if (renderer && renderer->renderer) {
+    renderer->renderer->cancel();
+  }
+}
+
 void SpektraRendererReleaseMemory(SpektraRendererRef renderer) {
   if (renderer && renderer->renderer) {
     renderer->renderer->releaseTransientResources();

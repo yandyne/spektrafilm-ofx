@@ -117,6 +117,9 @@ public:
   // Share of GPU time renders may take (0.1-1); below 1 they run in short
   // command buffers with pauses between, so the display and other apps get the GPU.
   virtual void setGpuDutyCycle(float) {}
+  // Asks a running render to stop at its next command buffer boundary (it then
+  // fails with "Render cancelled."); safe from any thread, cleared when a render starts.
+  virtual void cancel() {}
 
   // Renders `region` of the frame `window` as part of the whole frame (grain
   // positions, auto exposure and frame-relative effects stay those of the

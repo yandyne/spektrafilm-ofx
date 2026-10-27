@@ -35,6 +35,7 @@ public:
   void releaseTransientResources() override;
   void setMemoryBudgetBytes(uint64_t bytes) override;
   void setGpuDutyCycle(float duty) override;
+  void cancel() override;
   bool startGpuTraceCapture(const std::string &path);
   void stopGpuTraceCapture();
 

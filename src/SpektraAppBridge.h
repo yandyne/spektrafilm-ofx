@@ -309,6 +309,8 @@ void SpektraRendererSetMemoryBudget(SpektraRendererRef renderer, uint64_t bytes)
    is split into short command buffers with pauses, keeping the system responsive. */
 void SpektraRendererSetGpuDutyCycle(SpektraRendererRef renderer, float duty);
 /* Frees cached scratch memory; the next render reallocates it. */
+// Stops a render running on another thread at its next safe point; it then returns 0.
+void SpektraRendererCancel(SpektraRendererRef renderer);
 void SpektraRendererReleaseMemory(SpektraRendererRef renderer);
 
 SpektraAppRenderParams SpektraAppMakeDefaultRenderParams(void);
