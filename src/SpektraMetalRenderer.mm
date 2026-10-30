@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
+#include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2674,12 +2675,22 @@ float measureAutoExposureEv(
   return std::isfinite(ev) ? static_cast<float>(ev) : 0.0f;
 }
 
+// No-copy Metal buffers need a page-multiple length (enforced on iOS, tolerated on macOS);
+// callers allocate pixel memory in whole pages, so rounding up never reads past the block.
+NSUInteger pageRounded(NSUInteger bytes) {
+  const NSUInteger page = static_cast<NSUInteger>(getpagesize());
+  return (bytes + page - 1) / page * page;
+}
+
 const void *contiguousFloatWindowPointer(
   const ImageView &view,
   const RenderWindow &window,
   int32_t width,
   int32_t height
 ) {
+#if TARGET_OS_SIMULATOR
+  return nullptr;  // the simulator's Metal cannot wrap app memory; the copy path below handles it
+#endif
   if (view.bytesPerComponent != 4 ||
       view.components != 4 ||
       window.x1 != view.x1 ||
@@ -2702,6 +2713,9 @@ void *contiguousFloatWindowPointer(
   int32_t width,
   int32_t height
 ) {
+#if TARGET_OS_SIMULATOR
+  return nullptr;  // the simulator's Metal cannot wrap app memory; the copy path below handles it
+#endif
   if (view.bytesPerComponent != 4 ||
       view.components != 4 ||
       window.x1 != view.x1 ||
@@ -2724,6 +2738,9 @@ const void *contiguousHalfWindowPointer(
   int32_t width,
   int32_t height
 ) {
+#if TARGET_OS_SIMULATOR
+  return nullptr;  // the simulator's Metal cannot wrap app memory; the copy path below handles it
+#endif
   if (view.bytesPerComponent != 2 ||
       view.components != 4 ||
       window.x1 != view.x1 ||
@@ -2746,6 +2763,9 @@ void *contiguousHalfWindowPointer(
   int32_t width,
   int32_t height
 ) {
+#if TARGET_OS_SIMULATOR
+  return nullptr;  // the simulator's Metal cannot wrap app memory; the copy path below handles it
+#endif
   if (view.bytesPerComponent != 2 ||
       view.components != 4 ||
       window.x1 != view.x1 ||
@@ -4786,7 +4806,7 @@ bool MetalRenderer::renderSingle(
       }
     } else if (const void *directSource = contiguousFloatWindowPointer(source, window, width, height)) {
       srcBuffer = [impl_->device newBufferWithBytesNoCopy:const_cast<void *>(directSource)
-                                                   length:bufferBytes
+                                                   length:pageRounded(bufferBytes)
                                                   options:MTLResourceStorageModeShared
                                               deallocator:nil];
       sourceWrappedDirectly = srcBuffer != nil;
@@ -4795,7 +4815,7 @@ bool MetalRenderer::renderSingle(
       if (const void *directHalfSource = contiguousHalfWindowPointer(source, window, width, height)) {
         const NSUInteger halfBufferBytes = static_cast<NSUInteger>(width) * static_cast<NSUInteger>(height) * 4u * sizeof(uint16_t);
         sourceHalfBuffer = [impl_->device newBufferWithBytesNoCopy:const_cast<void *>(directHalfSource)
-                                                            length:halfBufferBytes
+                                                            length:pageRounded(halfBufferBytes)
                                                            options:MTLResourceStorageModeShared
                                                        deallocator:nil];
         sourceHalfWrappedDirectly = sourceHalfBuffer != nil;
@@ -4816,7 +4836,7 @@ bool MetalRenderer::renderSingle(
       }
     } else if (void *directDestination = contiguousFloatWindowPointer(destination, window, width, height)) {
       dstBuffer = [impl_->device newBufferWithBytesNoCopy:directDestination
-                                                   length:bufferBytes
+                                                   length:pageRounded(bufferBytes)
                                                   options:MTLResourceStorageModeShared
                                               deallocator:nil];
       destinationWrappedDirectly = dstBuffer != nil;
@@ -4825,7 +4845,7 @@ bool MetalRenderer::renderSingle(
       if (void *directHalfDestination = contiguousHalfWindowPointer(destination, window, width, height)) {
         const NSUInteger halfBufferBytes = static_cast<NSUInteger>(width) * static_cast<NSUInteger>(height) * 4u * sizeof(uint16_t);
         destinationHalfBuffer = [impl_->device newBufferWithBytesNoCopy:directHalfDestination
-                                                                 length:halfBufferBytes
+                                                                 length:pageRounded(halfBufferBytes)
                                                                 options:MTLResourceStorageModeShared
                                                             deallocator:nil];
         destinationHalfWrappedDirectly = destinationHalfBuffer != nil;
