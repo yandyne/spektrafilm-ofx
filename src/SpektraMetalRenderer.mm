@@ -3372,6 +3372,7 @@ struct MetalRenderer::Impl {
       return 0.0;
     }
     uint64_t frequency = 1000000000ull;
+#if TARGET_OS_OSX  // iOS SDK has no queryTimestampFrequency; keep the 1 GHz default there.
     if (@available(macOS 26.0, *)) {
       if ([device respondsToSelector:@selector(queryTimestampFrequency)]) {
         const uint64_t queried = [device queryTimestampFrequency];
@@ -3380,6 +3381,7 @@ struct MetalRenderer::Impl {
         }
       }
     }
+#endif
     return static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency);
   }
 
