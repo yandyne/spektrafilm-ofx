@@ -1,5 +1,10 @@
 # spektrafilm OFX
 
+> **This is the `photoemul` branch of a fork.** It is [chaert-s/spektrafilm-ofx](https://github.com/chaert-s/spektrafilm-ofx)
+> with the engine changes used by [PhotoEmul](https://github.com/yandyne/PhotoEmul), a macOS film emulation editor that
+> includes this repository as a git submodule. It is not the official spektrafilm OFX; for the plug-in itself, its releases
+> and support, go to the original repository. The rest of this README is the original one.
+
 spektrafilm OFX is a native OpenFX plugin project built from the `spektrafilm`
 film-simulation codebase. It is intended for host applications such as DaVinci
 Resolve or Nuke and provides Metal/Vulkan-accelerated film, print, scan, grain, halation,
